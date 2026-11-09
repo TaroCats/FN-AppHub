@@ -85,6 +85,18 @@
               "size": 111880
             }
           }
+        },
+        "1.0.18": {
+          "os_min_version": "1.1.3100",
+          "updated_at": "2026-11-09T21:26:08+08:00",
+          "changelog": "- **修复子域代理响应头重复**：上游（Kestrel / Jellyfin、Emby 一类应用）自带 `Server`、`Date` 响应头，代理原样透传后 uvicorn 又各写一份，一个响应里出现两个 `date`、两个 `server`。Safari（CFNetwork）遇到重复单值头会判定响应无法解析，直接显示「网页似乎有问题，或者可能已永久移动到新的 Web 地址」。现在 `date` / `server` 列入丢弃名单，并对所有响应头做同名去重（同名只保留第一条）。\n- **修复子域模式相对跳转**：上游返回 `Location: web/index.html` 这类相对地址时，此前原样透传；现在按当前请求路径归一化为根相对地址（如 `/web/index.html`），避免不同客户端解析基准不一致导致跳到错误路径或空白页。",
+          "packages": {
+            "all": {
+              "download_url": "https://github.com/TaroCats/FN-AppHub/releases/download/v1.0.18/apphub_1.0.18.fpk",
+              "sha256": "10dd7dd1c1fa2589b984aa40f37f2afade21e430ece19ef316b121939584d91d",
+              "size": 112154
+            }
+          }
         }
       }
     }
