@@ -86,13 +86,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bin"
-          for i in 1 2 3; do
-            if curl -fsSL --retry 3 --connect-timeout 20 -o "$RUNNER_TEMP/bin/fnpack" "$FNPACK_URL"; then
-              break
-            fi
-            echo "下载 fnpack 失败，第 $i 次重试..."
-            sleep 5
-          done
+          # 优先使用仓库内置的官方二进制（官方源 static2.fnnas.com 在海外 runner 上不可达）
+          if [ -f tools/fnpack-linux-amd64 ]; then
+            cp tools/fnpack-linux-amd64 "$RUNNER_TEMP/bin/fnpack"
+            echo "使用仓库内置 fnpack：$(md5sum "$RUNNER_TEMP/bin/fnpack" | awk '{print $1}')"
+          else
+            for i in 1 2 3; do
+              if curl -fsSL --retry 3 --connect-timeout 20 -o "$RUNNER_TEMP/bin/fnpack" "$FNPACK_URL"; then
+                break
+              fi
+              echo "下载 fnpack 失败，第 $i 次重试..."
+              sleep 5
+            done
+          fi
           chmod +x "$RUNNER_TEMP/bin/fnpack"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/bin/fnpack" --help | head -3
