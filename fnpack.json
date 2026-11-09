@@ -49,6 +49,18 @@
               "size": 93296
             }
           }
+        },
+        "1.0.15": {
+          "os_min_version": "1.1.3100",
+          "updated_at": "2026-11-09T18:54:59+08:00",
+          "changelog": "- **统一配置改为「固定域名 + 映射 IP」**：选择统一配置的应用，地址只保存 `协议://fnos.local:端口`，不再把当时的 IP 写进每个应用。\n  - 主面板「访问地址」保存的是 **fnos.local 的映射 IP**，服务端把它写入容器 `/etc/hosts`（带 `# apphub-managed` 标记），容器重建后按库中记录自动恢复。\n  - 换 IP、换网段时只改这一处映射，所有统一配置应用立即跟随，不再逐个改地址，也不会产生一堆积压的旧 IP。\n  - 旧版本升级后，库中已有的统一配置应用地址会在启动时自动收敛为 `fnos.local`，端口与主页路径保持不变。\n- **编辑弹窗不再要求填写 IP**：主机固定显示 `fnos.local`，只填端口即可；预览行会提示当前 fnos.local 映射到哪个 IP。\n- **「访问地址」弹窗语义调整**：标题改为「统一配置访问地址（映射 IP）」，只保存映射，不再批量替换各应用主机；自定义地址的应用不受影响。\n- **直连说明**：`fnos.local` 由 AppHub 在容器内解析，内嵌浏览（代理/直连）均可用；在其它设备的新标签页直连时，需要该设备能解析 `fnos.local`（fnOS 默认 mDNS）或在系统 hosts 中手动指向 NAS IP。\n- 后端 `rebind-host` / `settings/base-host` 改为「保存映射」语义，扫描收录的地址同样落成 `fnos.local:端口`，重复检测按别名地址判断。",
+          "packages": {
+            "all": {
+              "download_url": "https://github.com/TaroCats/FN-AppHub/releases/download/v1.0.15/apphub_1.0.15.fpk",
+              "sha256": "23e9e004264c23caae4326a9222697a8611a1165a15898d42375cc341a6a075c",
+              "size": 94004
+            }
+          }
         }
       }
     }
