@@ -109,6 +109,17 @@
               "size": 113417
             }
           }
+        },
+        "1.0.21": {
+          "os_min_version": "1.1.3100",
+          "updated_at": "2026-11-09T23:00:39+08:00",
+          "packages": {
+            "all": {
+              "download_url": "https://github.com/TaroCats/FN-AppHub/releases/download/v1.0.21/apphub_1.0.21.fpk",
+              "sha256": "227b7735f09adc41bf5898ed5d0abc63c9532c18a52600780d37cd8f9a018e08",
+              "size": 118237
+            }
+          }
         }
       }
     }
