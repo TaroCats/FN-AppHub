@@ -2,8 +2,8 @@
 
 把本机所有 Docker 应用的 Web 入口聚合成一个页面，自动扫描容器暴露端口，支持在应用内直接内嵌浏览。
 
-- 当前版本：1.0.15
-- 安装包：`apphub_1.0.15.fpk`（飞牛应用中心 / FnDepot 均可安装）
+- 当前版本：1.0.16
+- 安装包：`apphub_1.0.16.fpk`（飞牛应用中心 / FnDepot 均可安装）
 - 端口：9080（host 网络）
 - 数据目录：`/var/apps/apphub/shares/apphub/data`（SQLite 数据库 `apphub.db`）
 
@@ -46,6 +46,8 @@ https://raw.githubusercontent.com/TaroCats/FN-AppHub/main/fnpack.json
 | 手动新增 | 名称、地址、端口、协议、分组、图标，支持任意内网/外网 URL |
 | 访问列表管理 | 编辑、删除、分组、搜索（按名称/地址/分组） |
 | 应用内浏览 | 每个条目可在 AppHub 窗口内浏览，顶部 tab 可切「内嵌（代理）」与「直连」；打开方式（窗口内 / 新标签页）与浏览模式是两个独立字段 |
+| 子域代理 | 内嵌浏览走 `app-<id>.fnos.local` 子域反代，根路径原样转发，绝对路径应用不再 404；域名由内置 mDNS 响应 |
+| 调试面板 | 右侧抽屉查看子域映射、mDNS 命中、运行日志；可分级/关键字过滤、一键调试模式、复制 hosts |
 | 在线状态 | 后台定时探测目标可达性，卡片上显示在线/离线 |
 | 图标抓取 | 自动尝试抓取目标站点 favicon，失败则用首字母色块 |
 
@@ -89,6 +91,20 @@ python3 scripts/gen_fnpack.py --version 1.0.13 \
 ```
 
 > `fnpack.json` 中的 `sha256` 必须与 Release 上的 fpk 完全一致，否则 FnDepot 会校验失败并跳过该版本。请始终让工作流生成，不要手工编造哈希。
+
+## 1.0.16 变更
+
+- **内嵌浏览改用子域反向代理**：每个应用分配稳定子域 `app-<id>.fnos.local`，iframe 直接以该子域根路径访问，绝对路径资源、`fetch`/`WebSocket`、302 跳转、Cookie 全部按同源处理。
+  - 不再依赖 `/p/{id}/` 前缀改写，彻底解决应用发起「绝对根路径请求」时落到 AppHub 根导致的 404。
+  - 代理层剥离上游 `X-Frame-Options` / CSP `frame-ancestors`，注入运行时补丁把应用里写死的旧源重写为当前子域。
+  - 子域由内置 mDNS 响应器解析：多网卡逐个加入 `224.0.0.251` 组播组，逐个网卡回包，避免 Clash/Tailscale 类 tun 网卡抢占默认路由导致查询收不到。
+  - 解析 IP 优先取「访问地址」里保存的映射 IP，遇到回环地址自动回退到探测到的局域网 IP；mDNS 端口被占用或权限不足时只告警，不影响面板。
+- **新增调试面板**：面板顶部「调试」按钮打开右侧抽屉，可查看子域映射、mDNS 应答 IP 与命中次数、日志文件位置。
+  - 一键开关「调试模式」（服务端提升到 DEBUG 级），支持级别过滤、关键字过滤（如 `app-12`、`502`、`set-cookie`）、刷新与清空。
+  - 内置「复制 hosts」：mDNS 不可用的设备可直接拿到 `IP\t域名\t# 注释` 三行文本贴进系统 hosts。
+  - 新增 `GET /api/debug`、`GET /api/logs`、`GET /api/subdomains`、`POST/GET /api/hosts`；日志落盘 `data/logs/apphub.log` 并支持运行时按级别检索。
+- **内嵌容错**：打开内嵌时对子域做一次静默探活，解析/连接失败会在工具条下方提示「子域解析失败」，并给出「复制 hosts」按钮，不再只显示笼统的「加载较慢」。
+- **修复**：mDNS 解析查询名时 `idna` 编解码器不支持 `errors="ignore"` 导致所有查询被静默丢弃的问题（此前表现为「端口已监听但查询无应答」）。
 
 ## 1.0.15 变更
 
@@ -199,9 +215,13 @@ FN-AppHub/
 
 ## 内嵌浏览的实现要点
 
-- 反向代理路径：`/p/{app_id}/...`，代理层会重写 `Location`、`Set-Cookie` 中的域名，并注入前端运行时补丁（劫持 fetch / XHR / WebSocket / EventSource / history），把站点发起的绝对路径请求补上代理前缀。
+- 主路径：子域反向代理。每个应用有稳定 slug（默认 `app-<id>`），iframe 以 `http://app-<id>.fnos.local:<面板端口>/` 访问，AppHub 按请求 `Host` 分流：命中子域走该应用的代理，其余走面板。
+- 子域根路径原样转发，因此「/api/xxx」「/web/css/app.css」这类绝对路径请求不会再落到 AppHub 根导致 404；响应侧剥离 `X-Frame-Options` 与 CSP `frame-ancestors`，并把 `Location`、`Set-Cookie` 的域名收敛到当前子域。
+- 注入运行时补丁（fetch / XHR / WebSocket / EventSource / history / 字符串里的旧源），把前端写死的 `http://旧地址` 重写为当前子域，规避跨域。
+- 子域解析由内置 mDNS 负责（多网卡加入组播组、多网卡回包），不依赖系统 avahi；解析不到的设备可在调试抽屉里复制 hosts 文本手动写入。
+- 兼容旧路径：`/p/{app_id}/...` 前缀代理仍然保留，仅适用于相对路径应用，遇到绝对路径应用请改用子域。
 - 因此对 OpenList、Emby、Cloudreve、qBittorrent 等常见面板可直接内嵌登录并操作。
-- 少数站点用 `X-Frame-Options` / CSP 强限制或被代理识别，内嵌会失败 → 工具条上点「直连打开」在新标签页访问。
+- 少数站点强依赖自身域名或做防盗链，内嵌仍可能异常 → 工具条上点「直连打开」在新标签页访问。
 
 ## 非应用中心方式运行（调试用）
 

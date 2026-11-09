@@ -11,7 +11,12 @@ const state = {
   groupList: [],
   baseHost: '',
   hostSynced: false,
+  webSuffix: 'fnos.local',
+  selfPort: '',
+  debug: false,
+  logTimer: null,
 };
+
 
 const $ = (sel) => document.querySelector(sel);
 const grid = $('#grid');
@@ -297,7 +302,7 @@ function openApp(app) {
   }
   state.current = app;
   $('#viewer-name').textContent = app.name;
-  $('#viewer-url').textContent = openUrl(app);
+  $('#viewer-url').textContent = frameUrlOf(app);
   document.querySelectorAll('#viewer-mode button').forEach((b) => {
     b.classList.toggle('active', b.dataset.mode === (app.mode || 'proxy'));
   });
@@ -306,15 +311,48 @@ function openApp(app) {
   loadFrame(app, app.mode || 'proxy');
 }
 
+const HINT_TEXT = {
+  slow: '页面加载较慢或被站点拒绝内嵌：切「直连」绕过代理重试，或在新窗口打开。',
+  resolve: '子域解析失败：本机没查到该域名。请点「复制 hosts」写入系统 hosts，或用 mDNS 设备访问；也可切「直连」。',
+};
+
+function showViewerHint(kind) {
+  const text = $('#viewer-hint-text');
+  const hostsBtn = $('#hint-hosts');
+  if (text) text.textContent = HINT_TEXT[kind] || HINT_TEXT.slow;
+  if (hostsBtn) hostsBtn.hidden = kind !== 'resolve';
+  $('#viewer-hint').hidden = false;
+}
+
+/* 探活子域：no-cors 下只要能建立连接就算解析成功，DNS/连接失败才会 reject */
+async function probeSubdomain(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2500);
+  try {
+    await fetch(url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
+    return true;
+  } catch (err) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function loadFrame(app, mode) {
   const hint = $('#viewer-hint');
   hint.hidden = true;
-  const src = mode === 'direct' ? openUrl(app) : `/p/${app.id}${homePath(app) || '/'}`;
+  const src = mode === 'direct' ? openUrl(app) : frameUrlOf(app);
+  $('#viewer-url').textContent = mode === 'direct' ? openUrl(app) : frameUrlOf(app);
   frame.src = src;
   clearTimeout(loadFrame._t);
   loadFrame._t = setTimeout(() => {
-    if (!viewer.hidden) hint.hidden = false;
-  }, 6000);
+    if (!viewer.hidden) showViewerHint('slow');
+  }, 8000);
+  if (mode === 'proxy') {
+    probeSubdomain(src).then((ok) => {
+      if (!ok && !viewer.hidden && state.current === app) showViewerHint('resolve');
+    });
+  }
 }
 
 function closeViewer() {
@@ -340,6 +378,16 @@ $('#viewer-full').addEventListener('click', () => {
     (viewer.requestFullscreen ? viewer.requestFullscreen() : Promise.resolve()).catch(() => {});
   } else {
     document.exitFullscreen().catch(() => {});
+  }
+});
+$('#hint-hosts').addEventListener('click', async () => {
+  try {
+    const info = debugInfo || (await api('/api/debug'));
+    debugInfo = info;
+    await navigator.clipboard.writeText(info.hosts || '');
+    toast('hosts 片段已复制');
+  } catch (err) {
+    toast('复制失败：请打开右上角「调试」面板手动复制');
   }
 });
 $('#hint-direct').addEventListener('click', () => {
@@ -440,6 +488,15 @@ function homePath(app) {
 function openUrl(app) {
   if (!app) return '';
   return `${String(app.url || '').replace(/\/+$/, '')}${homePath(app)}`;
+}
+
+/* 子域地址：每个应用独占 app-xx.fnos.local:9080，根路径原样反代 */
+function frameUrlOf(app) {
+  if (!app) return 'about:blank';
+  if (app.frame_url) return app.frame_url;
+  const slug = app.slug || `app-${app.id}`;
+  const port = state.selfPort && String(state.selfPort) !== '80' ? `:${state.selfPort}` : '';
+  return `http://${slug}.${state.webSuffix || 'fnos.local'}${port}${homePath(app) || '/'}`;
 }
 
 function initHostPicker() {
@@ -1115,6 +1172,8 @@ async function load() {
     const data = await api('/api/apps');
     state.apps = data.apps || [];
     state.groups = data.groups || [];
+    state.webSuffix = data.web_suffix || state.webSuffix;
+    state.selfPort = data.self_port || state.selfPort;
     if (!state.baseHost) {
       try {
         const setting = await api('/api/settings/base-host');
@@ -1177,6 +1236,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (!viewer.hidden) return closeViewer();
   if (!$('#modal').hidden) return closeModal();
+  if (debugDrawer && !debugDrawer.hidden) return closeDebug();
   if (!$('#scan-drawer').hidden) return closeScan();
 });
 
@@ -1186,3 +1246,130 @@ initHostPicker();
 reportHost();
 load();
 setInterval(probeAll, 60000);
+
+/* ---------------- 调试 / 日志 ---------------- */
+const debugDrawer = $('#debug-drawer');
+const debugMask = $('#debug-mask');
+let debugInfo = null;
+let debugLastSeq = 0;
+
+function openDebug() {
+  debugDrawer.hidden = false;
+  debugMask.hidden = false;
+  debugLastSeq = 0;
+  refreshDebugMeta();
+  refreshLogs(true);
+  clearInterval(state.logTimer);
+  state.logTimer = setInterval(() => {
+    if (!debugDrawer.hidden) refreshLogs(false);
+  }, 2500);
+}
+
+function closeDebug() {
+  debugDrawer.hidden = true;
+  debugMask.hidden = true;
+  clearInterval(state.logTimer);
+  state.logTimer = null;
+}
+
+async function refreshDebugMeta() {
+  try {
+    const info = await api('/api/debug');
+    debugInfo = info;
+    const mdns = info.mdns || {};
+    const rows = (info.apps || []).map((a) => (
+      `<div><code>${escapeHtml(a.frame_url)}</code> → <code>${escapeHtml(a.upstream)}</code></div>`
+    )).join('');
+    $('#debug-meta').innerHTML = [
+      `子域后缀 <code>${escapeHtml(info.suffix)}</code> · 端口 <code>${escapeHtml(info.self_port)}</code> · mDNS <code>${mdns.running ? '已启动' : '不可用'}</code>（应答 IP <code>${escapeHtml(mdns.ip || '未设置')}</code>，命中 <code>${mdns.hits || 0}</code> 次）`,
+      `日志文件 <code>${escapeHtml(info.log_file)}</code>`,
+      rows,
+    ].filter(Boolean).join('<br>');
+    $('#debug-summary').textContent = `调试模式：${info.enabled ? '开启' : '关闭'} · ${(info.apps || []).length} 个子域`;
+    $('#debug-toggle').checked = !!info.enabled;
+    $('#debug-hosts-tip').textContent = mdns.running
+      ? '子域由内置 mDNS 自动解析'
+      : 'mDNS 不可用，请用「复制 hosts」在客户端手动映射';
+  } catch (err) {
+    $('#debug-meta').textContent = `读取调试信息失败：${err.message}`;
+  }
+}
+
+async function refreshLogs(reset) {
+  const params = new URLSearchParams({ limit: '300' });
+  const level = $('#debug-level').value;
+  const keyword = $('#debug-q').value.trim();
+  if (level) params.set('level', level);
+  if (keyword) params.set('q', keyword);
+  if (!reset && debugLastSeq) params.set('since', String(debugLastSeq));
+  try {
+    const data = await api(`/api/logs?${params.toString()}`);
+    const list = $('#log-list');
+    if (reset) {
+      list.innerHTML = '';
+      debugLastSeq = 0;
+    }
+    const items = data.items || [];
+    if (!items.length && reset) {
+      list.innerHTML = '<div class="log-empty">暂无日志</div>';
+      return;
+    }
+    const empty = list.querySelector('.log-empty');
+    if (empty) empty.remove();
+    const html = items.map((item) => {
+      debugLastSeq = Math.max(debugLastSeq, item.seq);
+      return `<div class="log-row"><span class="t">${escapeHtml(item.time)}</span>`
+        + `<span class="lv ${escapeHtml(item.level)}">${escapeHtml(item.level)}</span>`
+        + `<span class="m">${escapeHtml(item.msg)}</span></div>`;
+    }).join('');
+    list.insertAdjacentHTML('beforeend', html);
+    while (list.childElementCount > 600) list.removeChild(list.firstElementChild);
+    list.scrollTop = list.scrollHeight;
+  } catch (err) {
+    $('#log-list').innerHTML = `<div class="log-empty">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+$('#btn-debug').addEventListener('click', openDebug);
+$('#debug-close').addEventListener('click', closeDebug);
+$('#debug-mask').addEventListener('click', closeDebug);
+$('#debug-refresh').addEventListener('click', () => { refreshDebugMeta(); refreshLogs(true); });
+$('#debug-level').addEventListener('change', () => refreshLogs(true));
+$('#debug-q').addEventListener('input', () => {
+  clearTimeout(refreshLogs._t);
+  refreshLogs._t = setTimeout(() => refreshLogs(true), 350);
+});
+$('#debug-clear').addEventListener('click', async () => {
+  try {
+    await api('/api/logs', { method: 'DELETE' });
+    refreshLogs(true);
+    toast('日志已清空');
+  } catch (err) {
+    toast(err.message);
+  }
+});
+$('#debug-toggle').addEventListener('change', async (event) => {
+  try {
+    const res = await api('/api/debug', {
+      method: 'POST',
+      body: JSON.stringify({ enabled: event.target.checked }),
+    });
+    toast(`调试模式已${res.enabled ? '开启（输出 DEBUG 日志）' : '关闭'}`);
+    state.debug = !!res.enabled;
+    refreshDebugMeta();
+    refreshLogs(true);
+  } catch (err) {
+    event.target.checked = !event.target.checked;
+    toast(err.message);
+  }
+});
+$('#debug-copy-hosts').addEventListener('click', async () => {
+  const text = (debugInfo && debugInfo.hosts) || '';
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('hosts 片段已复制');
+  } catch (err) {
+    toast('复制失败，请手动选择日志面板中的地址');
+  }
+});

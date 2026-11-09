@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS apps (
     url_mode    TEXT    NOT NULL DEFAULT 'auto',
     port        TEXT    NOT NULL DEFAULT '',
     home_path   TEXT    NOT NULL DEFAULT '',
+    slug        TEXT    NOT NULL DEFAULT '',
     sort_order  INTEGER NOT NULL DEFAULT 0,
     created_at  REAL    NOT NULL,
     updated_at  REAL    NOT NULL
@@ -70,6 +71,7 @@ def init_db() -> None:
             ("url_mode", "ALTER TABLE apps ADD COLUMN url_mode TEXT NOT NULL DEFAULT 'auto'"),
             ("port", "ALTER TABLE apps ADD COLUMN port TEXT NOT NULL DEFAULT ''"),
             ("home_path", "ALTER TABLE apps ADD COLUMN home_path TEXT NOT NULL DEFAULT ''"),
+            ("slug", "ALTER TABLE apps ADD COLUMN slug TEXT NOT NULL DEFAULT ''"),
         ):
             if col not in cols:
                 conn.execute(ddl)
@@ -130,6 +132,20 @@ def find_by_url(url: str) -> Optional[dict[str, Any]]:
     return _row_to_dict(row) if row else None
 
 
+def find_by_slug(slug: str) -> Optional[dict[str, Any]]:
+    slug = (slug or "").strip().lower()
+    if not slug:
+        return None
+    with _lock, _conn() as conn:
+        row = conn.execute("SELECT * FROM apps WHERE lower(slug) = ?", (slug,)).fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def slug_taken(slug: str, exclude_id: Optional[int] = None) -> bool:
+    row = find_by_slug(slug)
+    return bool(row and row["id"] != exclude_id)
+
+
 def create_app(data: dict[str, Any]) -> dict[str, Any]:
     now = time.time()
     with _lock, _conn() as conn:
@@ -139,8 +155,8 @@ def create_app(data: dict[str, Any]) -> dict[str, Any]:
         cur = conn.execute(
             """INSERT INTO apps
                (name, url, icon, group_name, note, open_mode, mode, color, container,
-                url_mode, port, home_path, sort_order, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                url_mode, port, home_path, slug, sort_order, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 data["name"],
                 data["url"],
@@ -154,6 +170,7 @@ def create_app(data: dict[str, Any]) -> dict[str, Any]:
                 data.get("url_mode") or "auto",
                 data.get("port", ""),
                 data.get("home_path", ""),
+                data.get("slug", ""),
                 max_order + 10,
                 now,
                 now,
@@ -176,7 +193,7 @@ def update_app(app_id: int, data: dict[str, Any]) -> Optional[dict[str, Any]]:
     fields = []
     params: list[Any] = []
     for key in ("name", "url", "icon", "group_name", "note", "open_mode", "mode", "color", "container",
-                "url_mode", "port", "home_path"):
+                "url_mode", "port", "home_path", "slug"):
         if key in data and data[key] is not None:
             fields.append(f"{key} = ?")
             params.append(data[key])

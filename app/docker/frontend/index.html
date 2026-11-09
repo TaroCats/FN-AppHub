@@ -34,6 +34,10 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.2 2.2 3.3 5 3.3 8S14.2 17.8 12 20c-2.2-2.2-3.3-5-3.3-8S9.8 6.2 12 4z"/></svg>
         访问地址
       </button>
+      <button class="btn ghost" id="btn-debug" title="调试模式：查看转发日志与子域映射">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6a3 3 0 0 1 6 0"/><rect x="7" y="8" width="10" height="12" rx="5"/><path d="M3 12h4M17 12h4M4 6l3 2M20 6l-3 2M4 18l3-2M20 18l-3-2"/></svg>
+        调试
+      </button>
       <button class="btn primary" id="btn-add">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         新增应用
@@ -89,7 +93,8 @@
       </div>
     </div>
     <div class="viewer-hint" id="viewer-hint" hidden>
-      <span>页面加载较慢或被站点拒绝内嵌：切「直连」绕过代理重试，或在新窗口打开。</span>
+      <span id="viewer-hint-text">页面加载较慢或被站点拒绝内嵌：切「直连」绕过代理重试，或在新窗口打开。</span>
+      <button class="mini" id="hint-hosts" hidden>复制 hosts</button>
       <button class="mini" id="hint-direct">新窗口打开</button>
     </div>
     <iframe id="frame" title="应用预览"></iframe>
@@ -269,6 +274,42 @@
       </div>
     </div>
   </div>
+
+  <!-- 调试 / 日志 -->
+  <div class="drawer-mask" id="debug-mask" hidden></div>
+  <aside class="drawer debug-drawer" id="debug-drawer" hidden>
+    <header class="drawer-head">
+      <div>
+        <h3>调试与运行日志</h3>
+        <p id="debug-summary">—</p>
+      </div>
+      <button class="icon-btn" id="debug-close">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div class="drawer-toolbar">
+      <label class="checkline"><input type="checkbox" id="debug-toggle"> 调试模式（DEBUG 级日志）</label>
+      <select id="debug-level" title="日志级别">
+        <option value="">全部</option>
+        <option value="INFO">INFO+</option>
+        <option value="WARNING">WARN+</option>
+        <option value="ERROR">ERROR</option>
+      </select>
+      <button class="mini" id="debug-refresh">刷新</button>
+      <button class="mini" id="debug-clear">清空</button>
+    </div>
+    <div class="debug-search">
+      <input id="debug-q" placeholder="过滤关键字，如 app-12、502、set-cookie" autocomplete="off">
+    </div>
+    <div class="debug-meta" id="debug-meta"></div>
+    <div class="log-list" id="log-list"></div>
+    <footer class="drawer-foot">
+      <span id="debug-hosts-tip">子域由内置 mDNS 解析</span>
+      <div>
+        <button class="btn ghost" id="debug-copy-hosts">复制 hosts</button>
+      </div>
+    </footer>
+  </aside>
 
   <div class="menu" id="card-menu"></div>
 
