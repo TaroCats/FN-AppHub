@@ -43,6 +43,29 @@ function hostOf(url) {
   }
 }
 
+/* 卡片上的地址文案：
+   - 走统一配置主机（url_mode=auto）的应用只显示端口 + 主页路径
+   - 自定义完整地址的应用全量显示（含协议、主机、端口、主页路径） */
+function isUnifiedAddr(app) {
+  if (!app) return false;
+  const mode = app.url_mode || (app.port ? 'auto' : 'custom');
+  return mode === 'auto';
+}
+
+function addrLabel(app) {
+  if (!app) return '';
+  const path = homePath(app);
+  if (isUnifiedAddr(app)) {
+    const p = parseAddr(app.url);
+    const port = String(app.port || p.port || '').trim();
+    const label = port ? `:${port}` : hostOf(app.url);
+    return `${label}${path}`;
+  }
+  const p = parseAddr(app.url);
+  if (!p.host) return openUrl(app);
+  return `${p.scheme}://${p.host}${p.port ? ':' + p.port : ''}${path}`;
+}
+
 /* ---- 访问地址（主机）工具 ---- */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0', '::1', '[::1]']);
 const HOST_KEY = 'apphub.host';
@@ -152,7 +175,7 @@ function renderGrid() {
         </div>
         <div class="card-body">
           <h3 title="${escapeHtml(app.name)}">${escapeHtml(app.name)}</h3>
-          <p title="${escapeHtml(openUrl(app))}">${escapeHtml(hostOf(app.url))}${escapeHtml(homePath(app))}${app.note ? ' · ' + escapeHtml(app.note) : ''}</p>
+          <p title="${escapeHtml(openUrl(app))}" class="${isUnifiedAddr(app) ? 'unified' : 'full'}">${escapeHtml(addrLabel(app))}${app.note ? ' · ' + escapeHtml(app.note) : ''}</p>
         </div>
         <button class="card-more" title="更多">
           <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>

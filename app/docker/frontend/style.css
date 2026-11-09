@@ -235,6 +235,22 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
   font-variant-numeric: tabular-nums;
 }
 
+/* 统一配置主机：只显示端口，紧凑展示 */
+.card-body p.unified {
+  color: var(--text-3);
+  letter-spacing: 0.2px;
+}
+
+/* 自定义完整地址：允许换行，最多两行，尽量完整呈现 */
+.card-body p.full {
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
 .card-more {
   position: absolute;
   top: 8px; right: 8px;
