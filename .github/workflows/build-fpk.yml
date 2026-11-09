@@ -101,7 +101,13 @@ jobs:
           fi
           chmod +x "$RUNNER_TEMP/bin/fnpack"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/bin/fnpack" --help | head -3
+          # 注意：不要直接 `fnpack --help | head -3`，pipefail 下 head 提前关闭管道会让脚本以 141 退出
+          if ! "$RUNNER_TEMP/bin/fnpack" --help > "$RUNNER_TEMP/fnpack-help.txt" 2>&1; then
+            echo "fnpack 无法执行，输出如下："
+            cat "$RUNNER_TEMP/fnpack-help.txt" || true
+            exit 1
+          fi
+          head -3 "$RUNNER_TEMP/fnpack-help.txt"
 
       - name: 打包 FPK
         run: |
