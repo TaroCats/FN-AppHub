@@ -2,8 +2,8 @@
 
 把本机所有 Docker 应用的 Web 入口聚合成一个页面，自动扫描容器暴露端口，支持在应用内直接内嵌浏览。
 
-- 当前版本：1.0.16
-- 安装包：`apphub_1.0.16.fpk`（飞牛应用中心 / FnDepot 均可安装）
+- 当前版本：1.0.17
+- 安装包：`apphub_1.0.17.fpk`（飞牛应用中心 / FnDepot 均可安装）
 - 端口：9080（host 网络）
 - 数据目录：`/var/apps/apphub/shares/apphub/data`（SQLite 数据库 `apphub.db`）
 
@@ -92,7 +92,7 @@ python3 scripts/gen_fnpack.py --version 1.0.13 \
 
 > `fnpack.json` 中的 `sha256` 必须与 Release 上的 fpk 完全一致，否则 FnDepot 会校验失败并跳过该版本。请始终让工作流生成，不要手工编造哈希。
 
-## 1.0.17 变更（未发布）
+## 1.0.17 变更
 
 - **mDNS 现在直接应答裸域名 `fnos.local`**：此前只匹配 `*.fnos.local` 子域，主面板地址仍靠 avahi 或系统 hosts；现在 `fnos.local` 本身与所有子域由同一个响应器应答，映射 IP 以「访问地址」里保存的值为准。
 - **修复「映射了 IP 但解析不到」**：`alias_ip()` 改为严格校验，只有合法 IPv4（排除回环/未指定/组播）才用于应答；填了域名、IPv6、`127.0.0.1` 等非法值时自动回退到探测到的局域网 IP 并在日志告警（旧逻辑把非法值直接交给 `inet_aton`，抛错后整个应答被吞掉，表现为「查询无应答」）。
