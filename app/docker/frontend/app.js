@@ -69,6 +69,8 @@ function addrLabel(app) {
 /* ---- 访问地址（主机）工具 ---- */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0', '::1', '[::1]']);
 const HOST_KEY = 'apphub.host';
+/* 统一配置应用的固定主机名，真实 IP 由服务端 hosts 映射 */
+const ALIAS_HOST = 'fnos.local';
 
 function urlHostname(url) {
   const raw = String(url || '').trim();
@@ -491,23 +493,23 @@ function setUrlMode(mode) {
 }
 
 function refreshAddrPreview() {
-  const host = hostForUrl(unifiedHost());
-  $('#form-host-label').textContent = host || '未配置主机';
+  const mapped = state.baseHost || currentHost();
+  $('#form-host-label').textContent = ALIAS_HOST;
   const port = ($('#form-port').value || '').trim();
   const scheme = $('#form-scheme').value;
   $('#form-url-preview').textContent = port
-    ? `将保存为 ${scheme}://${host}:${port}`
-    : `只填端口即可，主机统一为 ${host}`;
+    ? `将保存为 ${scheme}://${ALIAS_HOST}:${port}，${ALIAS_HOST} 映射到 ${mapped}`
+    : `只填端口即可，地址统一为 ${ALIAS_HOST}:端口（当前映射到 ${mapped}）`;
 }
 
 $('#form-url-mode').addEventListener('change', () => {
   const mode = $('#form-url-mode').value;
   if (mode === 'custom') {
-    // 切到自定义时，用当前统一配置拼一个初始地址方便修改
+    // 切到自定义时，用别名地址拼一个初始地址方便修改
     const port = ($('#form-port').value || '').trim();
     const input = $('#form-url');
     if (!input.value.trim() && port) {
-      input.value = `${$('#form-scheme').value}://${hostForUrl(unifiedHost())}:${port}`;
+      input.value = `${$('#form-scheme').value}://${ALIAS_HOST}:${port}`;
     }
   }
   setUrlMode(mode);
@@ -515,46 +517,44 @@ $('#form-url-mode').addEventListener('change', () => {
 $('#form-port').addEventListener('input', refreshAddrPreview);
 $('#form-scheme').addEventListener('change', refreshAddrPreview);
 
-/* ---- 批量修改已添加应用的访问地址 ---- */
+/* ---- 统一配置的映射 IP ---- */
 function bulkHost() {
   return hostFromMode($('#bulk-host').value, $('#bulk-host-custom'));
 }
 
 function bulkTargets() {
-  const host = bulkHost();
-  const onlyLoop = $('#bulk-only-loopback').checked;
-  if (!host) return [];
-  return state.apps.filter((app) => {
-    const host2 = urlHostname(app.url).toLowerCase();
-    if (!host2) return false;
-    // 统一配置模式的应用始终跟随全局主机，不受「只改回环地址」限制
-    const isAuto = (app.url_mode || 'auto') === 'auto';
-    if (onlyLoop && !isAuto && !LOOPBACK_HOSTS.has(host2)) return false;
-    return withHost(app.url, host) !== app.url;
-  });
+  /* 统一配置的应用固定使用 fnos.local，改映射即生效，不需要逐个改地址 */
+  return state.apps.filter((app) => (app.url_mode || 'auto') === 'auto');
 }
 
 function refreshBulkPreview() {
   const host = bulkHost();
   const targets = bulkTargets();
-  const preview = $('#host-preview');
+  const legacy = targets.filter((app) => urlHostname(app.url).toLowerCase() !== ALIAS_HOST);
   if (!host) {
-    preview.textContent = '请填写访问地址';
-  } else if (!targets.length) {
-    preview.textContent = `没有需要修改的应用（共 ${state.apps.length} 个）`;
+    $('#host-preview').textContent = '请填写映射 IP';
   } else {
-    preview.textContent = `将修改 ${targets.length} 个应用的主机为 ${host}，端口与路径保持不变`;
+    $('#host-preview').textContent = `将把 ${ALIAS_HOST} 映射到 ${host}；${targets.length} 个统一配置应用无需改地址`
+      + (legacy.length ? `（其中 ${legacy.length} 个旧地址保存时自动收敛为 ${ALIAS_HOST}）` : '');
   }
-  $('#host-apply').disabled = !host || !targets.length;
+  $('#host-apply').disabled = !host;
 }
 
 function openHostModal() {
   const sel = $('#bulk-host');
   const custom = $('#bulk-host-custom');
-  sel.options[0].textContent = `统一配置（${unifiedHost()}）`;
+  const mapped = state.baseHost || currentHost();
+  sel.options[0].textContent = `当前访问地址（${currentHost()}）`;
+  sel.options[1].textContent = '127.0.0.1（仅本机）';
   const saved = localStorage.getItem(HOST_KEY) || 'auto';
-  sel.value = saved === 'custom' ? 'custom' : saved === '127.0.0.1' ? '127.0.0.1' : 'auto';
-  custom.value = localStorage.getItem(`${HOST_KEY}.custom`) || '';
+  if (saved === 'custom') {
+    sel.value = 'custom';
+    custom.value = localStorage.getItem(`${HOST_KEY}.custom`) || mapped;
+  } else if (saved === '127.0.0.1') {
+    sel.value = '127.0.0.1';
+  } else {
+    sel.value = 'auto';
+  }
   custom.hidden = sel.value !== 'custom';
   $('#host-mask').hidden = false;
   $('#host-modal').hidden = false;
@@ -577,29 +577,24 @@ $('#bulk-host').addEventListener('change', () => {
   refreshBulkPreview();
 });
 $('#bulk-host-custom').addEventListener('input', refreshBulkPreview);
-$('#bulk-only-loopback').addEventListener('change', refreshBulkPreview);
 $('#host-apply').addEventListener('click', async () => {
   const host = bulkHost();
-  const ids = bulkTargets().map((a) => a.id);
-  if (!host || !ids.length) return;
+  if (!host) return;
   const btn = $('#host-apply');
   btn.disabled = true;
   try {
     const data = await api('/api/apps/rebind-host', {
       method: 'POST',
-      body: JSON.stringify({ host, only_loopback: $('#bulk-only-loopback').checked, app_ids: ids }),
+      body: JSON.stringify({ host }),
     });
     const mode = $('#bulk-host').value;
     localStorage.setItem(HOST_KEY, mode);
     if (mode === 'custom') localStorage.setItem(`${HOST_KEY}.custom`, host);
-    // 同步到服务端，作为「统一配置」及自动收录的默认主机
-    state.baseHost = host;
-    api('/api/settings/base-host', { method: 'POST', body: JSON.stringify({ host }) }).catch(() => {});
+    state.baseHost = data.host || host;
     closeHostModal();
     await load();
     initHostPicker();
-    const count = (data.updated || []).length;
-    toast(count ? `已更新 ${count} 个应用的访问地址` : '没有应用被修改');
+    toast(`已把 ${ALIAS_HOST} 映射到 ${state.baseHost}`);
   } catch (err) {
     toast(err.message);
   } finally {
@@ -1006,7 +1001,7 @@ function openModal(app) {
   $('#form-scheme').value = parsed.scheme || 'http';
   $('#form-port').value = app ? (app.port || parsed.port || '') : '';
   $('#form-url').value = app && mode === 'custom' ? app.url : '';
-  $('#form-url').placeholder = `http://${unifiedHost()}:端口`;
+  $('#form-url').placeholder = `http://${ALIAS_HOST}:端口`;
   $('#form-home-path').value = app ? (app.home_path || '') : '';
   setUrlMode(mode);
   form.group_name.value = app ? app.group_name : '';
@@ -1046,7 +1041,7 @@ $('#form').addEventListener('submit', async (event) => {
       $('#form-port').focus();
       return;
     }
-    url = `${$('#form-scheme').value}://${hostForUrl(unifiedHost())}:${Number(port)}`;
+    url = `${$('#form-scheme').value}://${ALIAS_HOST}:${Number(port)}`;
   } else {
     url = ($('#form-url').value || '').trim();
     if (!url) {

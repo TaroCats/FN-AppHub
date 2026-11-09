@@ -29,7 +29,76 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(os.environ.get("APPHUB_STATIC", "/app/static"))
 SELF_PORT = os.environ.get("APPHUB_PORT", "9080")
 
+# 统一配置应用的固定主机名：应用地址只保存 http://fnos.local:端口，
+# 真实 IP 通过 /etc/hosts 映射，换 IP 时只改映射，不动任何应用地址。
+ALIAS_HOST = (os.environ.get("APPHUB_ALIAS_HOST", "fnos.local").strip().lower() or "fnos.local")
+HOSTS_FILE = Path(os.environ.get("APPHUB_HOSTS_FILE", "/etc/hosts"))
+HOSTS_MARK = "# apphub-managed"
+
 app = FastAPI(title="AppHub", docs_url=None, redoc_url=None)
+
+
+def _to_alias_url(url: str, port: str = "") -> str:
+    """把地址收敛成统一的别名地址：协议沿用原地址，主机固定为 ALIAS_HOST。"""
+    raw = (url or "").strip()
+    scheme = "http"
+    real_port = str(port or "").strip()
+    if raw:
+        parsed = urlparse(raw if "://" in raw else "http://" + raw)
+        scheme = parsed.scheme or "http"
+        if not real_port:
+            try:
+                real_port = str(parsed.port or "")
+            except ValueError:
+                real_port = ""
+    target = f"{ALIAS_HOST}:{real_port}" if real_port else ALIAS_HOST
+    return f"{scheme}://{target}"
+
+
+def sync_alias_mapping(host: str) -> str:
+    """把 ALIAS_HOST 指向 host，写入 /etc/hosts（只维护带标记的行）。"""
+    host = normalize_host(host or "")
+    lines: list[str] = []
+    try:
+        if HOSTS_FILE.exists():
+            lines = HOSTS_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError as exc:
+        log.warning("读取 %s 失败：%s", HOSTS_FILE, exc)
+    kept = [line for line in lines if HOSTS_MARK not in line]
+    if host:
+        kept.append(f"{host}\t{ALIAS_HOST}\t{HOSTS_MARK}")
+    try:
+        HOSTS_FILE.write_text("\n".join(kept).rstrip("\n") + "\n", encoding="utf-8")
+        log.info("%s 映射已更新：%s -> %s", ALIAS_HOST, host or "(未设置)", HOSTS_FILE)
+    except OSError as exc:
+        log.warning(
+            "写入 %s 失败（%s）：%s 无法在容器内解析，请在宿主机 hosts 中添加映射",
+            HOSTS_FILE, exc, ALIAS_HOST,
+        )
+    return host
+
+
+def _migrate_auto_urls() -> list[dict[str, Any]]:
+    """统一配置模式的历史地址收敛为别名地址，保证换 IP 时无需改应用。"""
+    changed: list[dict[str, Any]] = []
+    for item in db.list_apps():
+        if (item.get("url_mode") or "auto") != "auto":
+            continue
+        new_url = _to_alias_url(item.get("url", ""), item.get("port", ""))
+        if new_url and new_url != item.get("url"):
+            db.update_app(item["id"], {"url": new_url})
+            changed.append({"id": item["id"], "name": item["name"], "url": new_url})
+    return changed
+
+
+def _apply_base_host(host: str) -> str:
+    """保存映射 IP：写库 + 更新 hosts，并收敛统一配置模式的应用地址。"""
+    host = normalize_host(host or "")
+    if host:
+        db.set_setting("base_host", host)
+        sync_alias_mapping(host)
+        _migrate_auto_urls()
+    return host
 
 
 # ---------------------------------------------------------------- 数据模型
@@ -85,18 +154,15 @@ class AppPayload(BaseModel):
 
     @model_validator(mode="after")
     def _fill_url(self) -> "AppPayload":
-        """统一配置模式下允许只给端口，地址由前端按全局主机拼好；这里兜底校验。"""
+        """统一配置模式的地址固定为「协议://fnos.local:端口」，真实 IP 靠 hosts 映射。"""
         if self.url_mode == "auto":
-            if not self.url:
-                if not self.port:
-                    raise ValueError("统一配置模式下需要填写端口")
-                host = normalize_host(db.get_setting("base_host", "")) or "127.0.0.1"
-                if ":" in host and not host.startswith("["):
-                    host = f"[{host}]"
-                self.url = f"http://{host}:{self.port}"
+            if not self.url and not self.port:
+                raise ValueError("统一配置模式下需要填写端口")
+            self.url = _to_alias_url(self.url, self.port)
             if not self.port:
                 try:
-                    self.port = str(urlparse(self.url).port or (443 if self.url.startswith("https") else 80))
+                    parsed = urlparse(self.url)
+                    self.port = str(parsed.port or (443 if parsed.scheme == "https" else 80))
                 except ValueError:
                     self.port = ""
         elif not self.url:
@@ -162,6 +228,9 @@ class GroupReorderPayload(BaseModel):
 @app.on_event("startup")
 async def _startup() -> None:
     db.init_db()
+    # 容器重建后 /etc/hosts 会重置，这里按库中记录的映射 IP 重新写入
+    sync_alias_mapping(db.get_setting("base_host", ""))
+    _migrate_auto_urls()
     asyncio.create_task(_first_run_import())
 
 
@@ -187,12 +256,13 @@ async def _first_run_import() -> None:
             continue
         if str(item["port"]) == SELF_PORT:
             continue
-        if db.find_by_url(item["url"]):
+        alias_url = _to_alias_url(item["url"], str(item.get("port") or ""))
+        if db.find_by_url(alias_url) or db.find_by_url(item["url"]):
             continue
         db.create_app(
             {
                 "name": item["suggest_name"],
-                "url": item["url"],
+                "url": alias_url,
                 "url_mode": "auto",
                 "port": str(item.get("port") or ""),
                 "group_name": item["suggest_group"],
@@ -339,47 +409,20 @@ class RebindPayload(BaseModel):
 
 @app.post("/api/apps/rebind-host")
 async def api_rebind_host(payload: RebindPayload) -> dict[str, Any]:
-    """把已添加应用的访问地址主机替换成指定主机。"""
-    host = normalize_host(payload.host)
+    """保存 fnos.local 的映射 IP：统一配置的应用地址保持 fnos.local:端口 不变。"""
+    host = _apply_base_host(payload.host)
     if not host:
         raise HTTPException(status_code=400, detail="访问地址无效")
 
-    apps = db.list_apps()
-    if payload.app_ids:
-        wanted = set(payload.app_ids)
-        apps = [item for item in apps if item["id"] in wanted]
-
-    taken = {item["url"] for item in db.list_apps()}
-    updated: list[dict[str, Any]] = []
-    conflicts: list[str] = []
-    skipped = 0
-    for item in apps:
-        current_host = _url_hostname(item["url"])
-        if not current_host:
-            skipped += 1
-            continue
-        if payload.only_loopback and (item.get("url_mode") or "auto") != "auto" and current_host not in _LOOPBACK:
-            skipped += 1
-            continue
-        try:
-            new_url = _rewrite_url_host(item["url"], host)
-        except ValueError:
-            skipped += 1
-            continue
-        if new_url == item["url"]:
-            skipped += 1
-            continue
-        if new_url in taken:
-            conflicts.append(item["name"])
-            continue
-        db.update_app(item["id"], {"url": new_url})
-        taken.discard(item["url"])
-        taken.add(new_url)
-        updated.append({"id": item["id"], "name": item["name"], "url": new_url})
-
-    if updated:
-        db.set_setting("base_host", host)
-    return {"ok": True, "host": host, "updated": updated, "skipped": skipped, "conflicts": conflicts}
+    auto_apps = [item for item in db.list_apps() if (item.get("url_mode") or "auto") == "auto"]
+    return {
+        "ok": True,
+        "host": host,
+        "alias": ALIAS_HOST,
+        "updated": [{"id": a["id"], "name": a["name"], "url": a["url"]} for a in auto_apps],
+        "skipped": 0,
+        "conflicts": [],
+    }
 
 
 # ---------------------------------------------------------------- Docker 扫描
@@ -399,11 +442,9 @@ class HostSetting(BaseModel):
 
 @app.post("/api/settings/base-host")
 async def api_set_base_host(payload: HostSetting) -> dict[str, Any]:
-    """前端上报当前访问地址，作为扫描/自动收录时的默认主机。"""
-    host = normalize_host(payload.host)
-    if host:
-        db.set_setting("base_host", host)
-    return {"ok": True, "host": host}
+    """前端上报映射 IP：写库并更新 fnos.local 的 hosts 映射。"""
+    host = _apply_base_host(payload.host)
+    return {"ok": True, "host": host, "alias": ALIAS_HOST}
 
 
 @app.get("/api/settings/base-host")
@@ -437,10 +478,12 @@ async def api_scan(
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"读取 Docker 失败：{exc}")
 
-    existing = {a["url"] for a in db.list_apps()}
+    apps = db.list_apps()
+    existing = {a["url"] for a in apps}
+    existing |= {_to_alias_url(a["url"], a.get("port", "")) for a in apps}
     for item in candidates:
         item.pop("probe_url", None)
-        item["added"] = item["url"] in existing
+        item["added"] = item["url"] in existing or _to_alias_url(item["url"], item["port"]) in existing
     return {"items": candidates, "count": len(candidates), "host": base_host}
 
 
@@ -449,8 +492,9 @@ async def api_import(payload: ImportPayload) -> dict[str, Any]:
     created = 0
     skipped = 0
     for item in payload.items:
-        url = item.url.rstrip("/")
-        if db.find_by_url(url):
+        port = str(urlparse(item.url if "://" in item.url else "http://" + item.url).port or "")
+        url = _to_alias_url(item.url, port)
+        if db.find_by_url(url) or db.find_by_url(item.url.rstrip("/")):
             skipped += 1
             continue
         db.create_app(
@@ -458,7 +502,7 @@ async def api_import(payload: ImportPayload) -> dict[str, Any]:
                 "name": item.name,
                 "url": url,
                 "url_mode": "auto",
-                "port": str(urlparse(url).port or ""),
+                "port": port,
                 "group_name": item.group_name or "Docker",
                 "color": item.color,
                 "container": item.container,

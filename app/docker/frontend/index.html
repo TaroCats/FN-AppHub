@@ -30,7 +30,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h9M4 18h6"/><path d="M17 12v6M14 15h6"/></svg>
         分组
       </button>
-      <button class="btn ghost" id="btn-host" title="修改已添加应用的访问地址">
+      <button class="btn ghost" id="btn-host" title="设置 fnos.local 的映射 IP">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.2 2.2 3.3 5 3.3 8S14.2 17.8 12 20c-2.2-2.2-3.3-5-3.3-8S9.8 6.2 12 4z"/></svg>
         访问地址
       </button>
@@ -151,7 +151,7 @@
           <option value="auto">统一配置（只填端口）</option>
           <option value="custom">自定义（完整地址）</option>
         </select>
-        <small>统一配置：主机沿用顶部「访问地址」面板选定的 IP，这里只填端口，保存时自动拼成 协议://主机:端口；自定义：自己填写完整地址。</small>
+        <small>统一配置：地址固定为 协议://fnos.local:端口，fnos.local 由 AppHub 映射到顶部「访问地址」保存的 IP，换 IP 只改映射、不动应用；自定义：自己填写完整地址。</small>
       </label>
       <div class="field" id="form-auto-field">
         <span>访问地址</span>
@@ -161,11 +161,11 @@
             <option value="https">https</option>
           </select>
           <span class="addr-sep">://</span>
-          <span class="addr-host" id="form-host-label">127.0.0.1</span>
+          <span class="addr-host" id="form-host-label">fnos.local</span>
           <span class="addr-sep">:</span>
           <input id="form-port" inputmode="numeric" placeholder="8096" autocomplete="off">
         </div>
-        <small id="form-url-preview">只填端口即可，主机自动跟随统一配置</small>
+        <small id="form-url-preview">只填端口即可，地址统一为 fnos.local:端口</small>
       </div>
       <label class="field" id="form-custom-field" hidden>
         <span>应用地址</span>
@@ -218,18 +218,18 @@
     </form>
   </div>
 
-  <!-- 批量修改访问地址 -->
+  <!-- 设置映射 IP -->
   <div class="modal-mask" id="host-mask" hidden></div>
   <div class="modal" id="host-modal" hidden>
     <header class="modal-head">
-      <h3>修改已添加应用的访问地址</h3>
+      <h3>统一配置访问地址（映射 IP）</h3>
       <button class="icon-btn" id="host-close">
         <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
     <div class="modal-body">
       <label class="field">
-        <span>访问地址</span>
+        <span>映射 IP</span>
         <div class="hostline in-modal">
           <select id="bulk-host">
             <option value="auto">当前访问地址</option>
@@ -238,15 +238,12 @@
           </select>
           <input id="bulk-host-custom" placeholder="如 nas.lan 或 192.168.1.10" hidden>
         </div>
-        <small>只替换主机部分，端口与路径保持不变</small>
+        <small>这里只保存 fnos.local 指向哪个 IP，不改任何应用地址；统一配置的应用始终用 fnos.local:端口 访问。</small>
       </label>
-      <div class="field">
-        <label class="checkline"><input type="checkbox" id="bulk-only-loopback" checked> 只修改当前为 127.0.0.1 / localhost 的应用</label>
-      </div>
-      <p class="host-preview" id="host-preview">将影响 0 个应用</p>
+      <p class="host-preview" id="host-preview">将把 fnos.local 映射到当前 IP</p>
       <div class="modal-foot">
         <button type="button" class="btn ghost" id="host-cancel">取消</button>
-        <button type="button" class="btn primary" id="host-apply">应用</button>
+        <button type="button" class="btn primary" id="host-apply">保存映射</button>
       </div>
     </div>
   </div>

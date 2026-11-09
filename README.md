@@ -2,8 +2,8 @@
 
 把本机所有 Docker 应用的 Web 入口聚合成一个页面，自动扫描容器暴露端口，支持在应用内直接内嵌浏览。
 
-- 当前版本：1.0.14
-- 安装包：`apphub_1.0.14.fpk`（飞牛应用中心 / FnDepot 均可安装）
+- 当前版本：1.0.15
+- 安装包：`apphub_1.0.15.fpk`（飞牛应用中心 / FnDepot 均可安装）
 - 端口：9080（host 网络）
 - 数据目录：`/var/apps/apphub/shares/apphub/data`（SQLite 数据库 `apphub.db`）
 
@@ -64,8 +64,8 @@ https://raw.githubusercontent.com/TaroCats/FN-AppHub/main/fnpack.json
 ```bash
 # A. 手动改版本号后打标签
 #    编辑 manifest 的 version 与 app/docker/docker-compose.yaml 的 image tag
-git commit -am "chore: bump 1.0.14"
-git tag v1.0.14 && git push origin main --tags
+git commit -am "chore: bump 1.0.15"
+git tag v1.0.15 && git push origin main --tags
 ```
 
 ```text
@@ -89,6 +89,17 @@ python3 scripts/gen_fnpack.py --version 1.0.13 \
 ```
 
 > `fnpack.json` 中的 `sha256` 必须与 Release 上的 fpk 完全一致，否则 FnDepot 会校验失败并跳过该版本。请始终让工作流生成，不要手工编造哈希。
+
+## 1.0.15 变更
+
+- **统一配置改为「固定域名 + 映射 IP」**：选择统一配置的应用，地址只保存 `协议://fnos.local:端口`，不再把当时的 IP 写进每个应用。
+  - 主面板「访问地址」保存的是 **fnos.local 的映射 IP**，服务端把它写入容器 `/etc/hosts`（带 `# apphub-managed` 标记），容器重建后按库中记录自动恢复。
+  - 换 IP、换网段时只改这一处映射，所有统一配置应用立即跟随，不再逐个改地址，也不会产生一堆积压的旧 IP。
+  - 旧版本升级后，库中已有的统一配置应用地址会在启动时自动收敛为 `fnos.local`，端口与主页路径保持不变。
+- **编辑弹窗不再要求填写 IP**：主机固定显示 `fnos.local`，只填端口即可；预览行会提示当前 fnos.local 映射到哪个 IP。
+- **「访问地址」弹窗语义调整**：标题改为「统一配置访问地址（映射 IP）」，只保存映射，不再批量替换各应用主机；自定义地址的应用不受影响。
+- **直连说明**：`fnos.local` 由 AppHub 在容器内解析，内嵌浏览（代理/直连）均可用；在其它设备的新标签页直连时，需要该设备能解析 `fnos.local`（fnOS 默认 mDNS）或在系统 hosts 中手动指向 NAS IP。
+- 后端 `rebind-host` / `settings/base-host` 改为「保存映射」语义，扫描收录的地址同样落成 `fnos.local:端口`，重复检测按别名地址判断。
 
 ## 1.0.14 变更
 
