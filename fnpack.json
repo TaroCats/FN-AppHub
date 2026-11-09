@@ -9,7 +9,7 @@
   "apps": {
     "apphub": {
       "display_name": "应用聚合中心",
-      "desc": "<p>把本机 Docker 应用聚合成一个入口：自动扫描容器暴露的端口，一键收录，并支持在应用内直接内嵌浏览（无需切换标签页）。</p><p><b>核心能力：</b>Docker 端口扫描与批量导入、手动新增/编辑访问列表、分组与搜索、子域反向代理内嵌浏览（app-xx.fnos.local，内置 mDNS）、图标自动抓取、内置调试面板与运行日志。</p><p><b>技术栈：</b>FastAPI + SQLite + 原生前端</p>",
+      "desc": "<p>把本机 Docker 应用聚合成一个入口：自动扫描容器暴露的端口，一键收录，并支持在应用内直接内嵌浏览（无需切换标签页）。</p><p><b>核心能力：</b>Docker 端口扫描与批量导入、手动新增/编辑访问列表、分组与搜索、IP 直连的应用内嵌浏览（不依赖域名、hosts 与反向代理）、图标自动抓取、内置调试面板与运行日志。</p><p><b>技术栈：</b>FastAPI + SQLite + 原生前端</p>",
       "platform": [
         "x86"
       ],
@@ -118,6 +118,18 @@
               "download_url": "https://github.com/TaroCats/FN-AppHub/releases/download/v1.0.21/apphub_1.0.21.fpk",
               "sha256": "227b7735f09adc41bf5898ed5d0abc63c9532c18a52600780d37cd8f9a018e08",
               "size": 118237
+            }
+          }
+        },
+        "1.0.22": {
+          "os_min_version": "1.1.3100",
+          "updated_at": "2026-11-10T00:04:21+08:00",
+          "changelog": "- **彻底弃用域名方案：应用一律 IP 直连**。此前内嵌依赖 `app-<id>.fnos.local` 子域（内置 mDNS 应答）与 `/p/{id}/` 同源反代，两者都存在解析与改写上的脆弱点：客户端没配 hosts 就打不开、DNS 被代理或隧道接管时 `.local` 解析被拖慢数秒、路径前缀反代遇到绝对路径资源与前端路由容易错位。本版直接删掉整条链路，应用地址保存为 `http://<局域网IP>:端口`，浏览器按 IP 直连加载。\n- **移除 mDNS 响应器与内置 hosts 写入**：删除 `app/mdns.py`，不再绑定 5353、不再向容器 `/etc/hosts` 写入 `app-<id>.<域名>` 映射，也不再提供 `/api/mdns/*`、`/api/hosts`、`/api/subdomains` 接口。局域网里不再有任何由 AppHub 发起的域名解析行为。\n- **移除 `/p/{id}/` 同源反代**：删除 `app/proxy.py` 与 `SubdomainDispatcher`，不再改写上游 HTML、不再剥离 `X-Frame-Options`、不再注入运行时补丁。现在内嵌页就是应用本身，登录态、WebSocket、绝对路径与前端路由全部由应用自己负责，行为与直接用浏览器打开一致。\n- **nginx 只托管面板**：容器内 nginx 依然对外监听 9080、把请求转给内部 `127.0.0.1:19080`，但不再生成任何按 `Host` 分流的虚拟主机；nginx 不可用时仍自动回退到 uvicorn 直连。\n- **「访问地址」改为 IP 重写语义**：顶部仍只有一个访问地址入口，保存后把统一配置模式的应用地址批量重写成 `http://该IP:端口`；换网段只改这一个值，不用逐个编辑应用。\n- **自动探测局域网 IP 更可靠**：删除对 Linux `ioctl` 的硬依赖，改为「ioctl → macOS `ifconfig` 解析 → 默认路由探测」三级回退，并按 `192.168 > 10 > 172 > 100` 打分挑选，避免 Clash/Tailscale 的 `198.18.x`、`100.x` 虚拟地址被当成访问地址。\n- **前端精简**：去掉「内嵌/直连」模式切换、hosts 复制按钮、mDNS 自检面板与子域探活提示，浏览页只保留「新窗口打开」；编辑弹窗只填端口即可，主机位置显示当前访问 IP。\n- **数据结构**：`mode` 字段保留但恒为 `direct`（兼容旧库，启动时统一迁移），`frame_path` 不再下发，历史 `proxy` 记录自动归为 `direct`。",
+          "packages": {
+            "all": {
+              "download_url": "https://github.com/TaroCats/FN-AppHub/releases/download/v1.0.22/apphub_1.0.22.fpk",
+              "sha256": "807529d7c738bd7ea64a88cdaf1b51d3d9adb49fa99cc333dce1b6dfb0d00316",
+              "size": 98566
             }
           }
         }
