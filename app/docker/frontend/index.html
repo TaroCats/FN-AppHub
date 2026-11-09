@@ -302,10 +302,12 @@
       <input id="debug-q" placeholder="过滤关键字，如 app-12、502、set-cookie" autocomplete="off">
     </div>
     <div class="debug-meta" id="debug-meta"></div>
+    <div class="mdns-result" id="mdns-selftest-result" hidden></div>
     <div class="log-list" id="log-list"></div>
     <footer class="drawer-foot">
-      <span id="debug-hosts-tip">子域由内置 mDNS 解析</span>
+      <span id="debug-hosts-tip">mDNS 正在解析面板地址</span>
       <div>
+        <button class="btn ghost" id="debug-mdns-test">mDNS 自检</button>
         <button class="btn ghost" id="debug-copy-hosts">复制 hosts</button>
       </div>
     </footer>

@@ -651,7 +651,8 @@ $('#host-apply').addEventListener('click', async () => {
     closeHostModal();
     await load();
     initHostPicker();
-    toast(`已把 ${ALIAS_HOST} 映射到 ${state.baseHost}`);
+    const answerIp = (data.mdns && data.mdns.ip) || state.baseHost;
+    toast(`已把 ${ALIAS_HOST} 映射到 ${state.baseHost}${data.mdns && data.mdns.running ? `，mDNS 应答 ${answerIp}` : ''}`);
   } catch (err) {
     toast(err.message);
   } finally {
@@ -1277,21 +1278,47 @@ async function refreshDebugMeta() {
     const info = await api('/api/debug');
     debugInfo = info;
     const mdns = info.mdns || {};
+    const suffixes = (mdns.suffixes && mdns.suffixes.length ? mdns.suffixes : [info.suffix])
+      .map((s) => `<code>${escapeHtml(s)}</code>`).join(' · ');
     const rows = (info.apps || []).map((a) => (
       `<div><code>${escapeHtml(a.frame_url)}</code> → <code>${escapeHtml(a.upstream)}</code></div>`
     )).join('');
     $('#debug-meta').innerHTML = [
-      `子域后缀 <code>${escapeHtml(info.suffix)}</code> · 端口 <code>${escapeHtml(info.self_port)}</code> · mDNS <code>${mdns.running ? '已启动' : '不可用'}</code>（应答 IP <code>${escapeHtml(mdns.ip || '未设置')}</code>，命中 <code>${mdns.hits || 0}</code> 次）`,
+      `域名 ${suffixes} · 端口 <code>${escapeHtml(info.self_port)}</code> · mDNS <code>${mdns.running ? '已启动' : '不可用'}</code>`,
+      `应答 IP <code>${escapeHtml(mdns.ip || '未获取')}</code>（${escapeHtml(mdns.source || '未知来源')}）· 裸域名 <code>${mdns.apex ? '已接管' : '未接管'}</code> · 命中 <code>${mdns.hits || 0}</code> 次`,
       `日志文件 <code>${escapeHtml(info.log_file)}</code>`,
       rows,
     ].filter(Boolean).join('<br>');
     $('#debug-summary').textContent = `调试模式：${info.enabled ? '开启' : '关闭'} · ${(info.apps || []).length} 个子域`;
     $('#debug-toggle').checked = !!info.enabled;
     $('#debug-hosts-tip').textContent = mdns.running
-      ? '子域由内置 mDNS 自动解析'
+      ? `mDNS 正在把 ${info.suffix} 解析到 ${mdns.ip || '局域网 IP'}`
       : 'mDNS 不可用，请用「复制 hosts」在客户端手动映射';
   } catch (err) {
     $('#debug-meta').textContent = `读取调试信息失败：${err.message}`;
+  }
+}
+
+async function runMdnsSelfTest() {
+  const box = $('#mdns-selftest-result');
+  const btn = $('#debug-mdns-test');
+  if (!box) return;
+  box.hidden = false;
+  box.textContent = '正在向本机 5353 端口发起查询…';
+  if (btn) btn.disabled = true;
+  try {
+    const data = await api('/api/mdns/selftest');
+    const items = (data.items || []).map((item) => (
+      `<div class="mdns-row ${item.ok ? 'ok' : 'bad'}">`
+      + `<code>${escapeHtml(item.name)}</code> → ${item.actual ? `<code>${escapeHtml(item.actual)}</code>` : '<em>无应答</em>'}`
+      + ` · 期望 <code>${escapeHtml(item.expect || '-')}</code> · 规则${item.matched ? '命中' : '未命中'}`
+      + '</div>'
+    )).join('');
+    box.innerHTML = `<div class="mdns-head">${data.ok ? '全部域名解析到指定 IP' : '存在解析异常的域名'} · 期望 IP <code>${escapeHtml(data.expect_ip || '-')}</code></div>${items}`;
+  } catch (err) {
+    box.textContent = `mDNS 自检失败：${err.message}`;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1373,3 +1400,5 @@ $('#debug-copy-hosts').addEventListener('click', async () => {
     toast('复制失败，请手动选择日志面板中的地址');
   }
 });
+
+$('#debug-mdns-test')?.addEventListener('click', runMdnsSelfTest);

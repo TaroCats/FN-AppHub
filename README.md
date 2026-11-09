@@ -92,6 +92,16 @@ python3 scripts/gen_fnpack.py --version 1.0.13 \
 
 > `fnpack.json` 中的 `sha256` 必须与 Release 上的 fpk 完全一致，否则 FnDepot 会校验失败并跳过该版本。请始终让工作流生成，不要手工编造哈希。
 
+## 1.0.17 变更（未发布）
+
+- **mDNS 现在直接应答裸域名 `fnos.local`**：此前只匹配 `*.fnos.local` 子域，主面板地址仍靠 avahi 或系统 hosts；现在 `fnos.local` 本身与所有子域由同一个响应器应答，映射 IP 以「访问地址」里保存的值为准。
+- **修复「映射了 IP 但解析不到」**：`alias_ip()` 改为严格校验，只有合法 IPv4（排除回环/未指定/组播）才用于应答；填了域名、IPv6、`127.0.0.1` 等非法值时自动回退到探测到的局域网 IP 并在日志告警（旧逻辑把非法值直接交给 `inet_aton`，抛错后整个应答被吞掉，表现为「查询无应答」）。
+- **修复多 question 查询包的应答结构**：一个查询包里同时带 A 与 AAAA（macOS / 部分路由器常见）时，应答包的 question 段只保留当前这一条，避免 `qdcount=1` 与内容不符导致整包被客户端丢弃。
+- **AAAA 查询回 NODATA**：本服务只有 IPv4，对 AAAA 显式返回 NOERROR + 0 条记录，客户端不必等 IPv6 超时。
+- **主动通告**：服务启动、以及「访问地址」映射 IP 变更时，向 `224.0.0.251` 组播通告一次 A 记录，客户端不用等旧记录 TTL（30 秒）过期。
+- **新增 mDNS 诊断接口**：`GET /api/mdns/status`（后缀列表、应答 IP 及来源、网卡、命中数）、`GET /api/mdns/selftest`（对 `fnos.local` 与各子域真实发起查询，对比「是否应答」与「实际解析到的 IP」）、`POST /api/mdns/announce`（手动重新通告）；调试抽屉新增「mDNS 自检」按钮并展示结果。
+- **hosts 片段同时给出裸域名与子域**：`IP	fnos.local` 与 `IP	app-12.fnos.local` 一起复制，不认 mDNS 的设备一次贴全。
+
 ## 1.0.16 变更
 
 - **内嵌浏览改用子域反向代理**：每个应用分配稳定子域 `app-<id>.fnos.local`，iframe 直接以该子域根路径访问，绝对路径资源、`fetch`/`WebSocket`、302 跳转、Cookie 全部按同源处理。

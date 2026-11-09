@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import re
@@ -138,6 +139,10 @@ def _apply_base_host(host: str) -> str:
         db.set_setting("base_host", host)
         sync_alias_mapping(host)
         _migrate_auto_urls()
+        # 映射 IP 变了就立刻通告，客户端不必等旧记录 TTL 过期
+        if MDNS is not None:
+            MDNS.announce()
+            log.info("访问地址已更新为 %s，mDNS 应答 IP %s", host, alias_ip() or "未获取")
     return host
 
 
@@ -238,20 +243,68 @@ def local_ip() -> str:
         return ""
 
 
+_WARNED_HOST = ""
+
+
+def _as_ipv4(value: str) -> str:
+    """把文本收敛成可用作 mDNS 应答的 IPv4；不可用返回空串。"""
+    text = (value or "").strip().strip("[]")
+    try:
+        parsed = ipaddress.ip_address(text)
+    except ValueError:
+        return ""
+    if parsed.version != 4 or parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
+        return ""
+    return str(parsed)
+
+
 def alias_ip() -> str:
     """mDNS 应答使用的 IP：优先「访问地址」里保存的映射 IP。
 
-    回环地址对局域网设备无意义，遇到时回退到探测到的局域网 IP。
+    回环地址对局域网设备无意义；填写了域名/IPv6/非法值时同样不能直接拿来应答
+    （以前这里只排除 127.*，一旦存的是域名就会静默不应答），统一回退到探测到的局域网 IP。
     """
+    global _WARNED_HOST
     saved = normalize_host(db.get_setting("base_host", ""))
-    if saved and not saved.startswith("127.") and saved != "localhost":
-        return saved
+    if saved:
+        ip = _as_ipv4(saved)
+        if ip:
+            _WARNED_HOST = ""
+            return ip
+        if saved != _WARNED_HOST:
+            _WARNED_HOST = saved
+            log.warning(
+                "访问地址「%s」不是可用的 IPv4，mDNS 改用自动探测的局域网 IP 应答；"
+                "请把「访问地址」填写为局域网 IP（如 192.168.1.10）",
+                saved,
+            )
     return local_ip()
+
+
+def mdns_snapshot() -> dict[str, Any]:
+    """调试面板用的 mDNS 状态；running/expect_ip 便于判断「域名是否映射到指定 IP」。"""
+    saved = normalize_host(db.get_setting("base_host", ""))
+    expect = alias_ip()
+    snap: dict[str, Any] = {
+        "running": MDNS is not None,
+        "hits": MDNS.hits if MDNS else 0,
+        "ip": expect,
+        "suffix": WEB_SUFFIX,
+        "alias": ALIAS_HOST,
+        "mapped": saved,
+        "source": "访问地址映射 IP" if saved and _as_ipv4(saved) else "自动探测局域网 IP",
+        "apex": True,
+    }
+    if MDNS:
+        snap.update(MDNS.status())
+    return snap
 
 
 def hosts_snippet() -> str:
     ip = alias_ip() or "<NAS-IP>"
-    lines = [f"{ip}\t{WEB_SUFFIX}\t# AppHub 面板"]
+    # 裸域名（fnos.local）也要列出来：部分客户端不做 mDNS 通配，直接访问面板时会用到
+    names = [WEB_SUFFIX] if WEB_SUFFIX == ALIAS_HOST else [ALIAS_HOST, WEB_SUFFIX]
+    lines = [f"{ip}\t{name}\t# AppHub 面板" for name in names]
     for item in db.list_apps():
         slug = ensure_slug(item)
         lines.append(f"{ip}\t{slug}.{WEB_SUFFIX}\t# {item['name']}")
@@ -413,7 +466,15 @@ async def _startup() -> None:
     for item in db.list_apps():
         decorate(item)
     try:
-        MDNS = await mdns_mod.start(WEB_SUFFIX, alias_ip)
+        # 同时公布裸域名（fnos.local）与统一后缀：面板访问不再依赖 avahi 是否在跑
+        MDNS = await mdns_mod.start([WEB_SUFFIX, ALIAS_HOST], alias_ip)
+        log.info(
+            "mDNS 应答 %s / *.%s -> %s（来源：%s）",
+            ALIAS_HOST, WEB_SUFFIX, alias_ip() or "未获取到局域网 IP",
+            "访问地址映射 IP" if _as_ipv4(db.get_setting("base_host", "")) else "自动探测局域网 IP",
+        )
+        # 启动即通告一次，客户端首次访问不必等广播查询
+        MDNS.announce()
     except Exception as exc:  # mDNS 只是便捷解析，失败不影响主功能
         log.warning("mDNS 未启动：%s", exc)
     asyncio.create_task(_first_run_import())
@@ -610,6 +671,7 @@ async def api_rebind_host(payload: RebindPayload) -> dict[str, Any]:
         "ok": True,
         "host": host,
         "alias": ALIAS_HOST,
+        "mdns": mdns_snapshot(),
         "updated": [{"id": a["id"], "name": a["name"], "url": a["url"]} for a in auto_apps],
         "skipped": 0,
         "conflicts": [],
@@ -635,7 +697,10 @@ class HostSetting(BaseModel):
 async def api_set_base_host(payload: HostSetting) -> dict[str, Any]:
     """前端上报映射 IP：写库并更新 fnos.local 的 hosts 映射。"""
     host = _apply_base_host(payload.host)
-    return {"ok": True, "host": host, "alias": ALIAS_HOST}
+    warning = ""
+    if host and not _as_ipv4(host):
+        warning = f"「{host}」不是可用的 IPv4，mDNS 将改用自动探测的局域网 IP 应答"
+    return {"ok": True, "host": host, "alias": ALIAS_HOST, "mdns": mdns_snapshot(), "warning": warning}
 
 
 @app.get("/api/settings/base-host")
@@ -826,11 +891,7 @@ async def api_debug_info() -> dict[str, Any]:
         "enabled": DEBUG,
         "suffix": WEB_SUFFIX,
         "self_port": SELF_PORT,
-        "mdns": {
-            "running": MDNS is not None,
-            "hits": MDNS.hits if MDNS else 0,
-            "ip": alias_ip(),
-        },
+        "mdns": mdns_snapshot(),
         "log_file": logbuf.log_file_path(db.DATA_DIR),
         "apps": [
             {
@@ -877,6 +938,69 @@ async def api_subdomains() -> dict[str, Any]:
 @app.get("/api/hosts")
 async def api_hosts() -> Response:
     return Response(content=hosts_snippet(), media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/mdns/status")
+async def api_mdns_status() -> dict[str, Any]:
+    """mDNS 运行状态：后缀列表、网卡、应答 IP 及其来源。"""
+    snap = mdns_snapshot()
+    snap["hosts"] = hosts_snippet()
+    return snap
+
+
+@app.post("/api/mdns/announce")
+async def api_mdns_announce() -> dict[str, Any]:
+    """手动触发一次组播通告：客户端仍解析到旧 IP 时用来强制刷新。"""
+    if MDNS is None:
+        raise HTTPException(status_code=503, detail="mDNS 未启动，请检查 5353 端口占用")
+    MDNS.announce()
+    return {"ok": True, "mdns": mdns_snapshot()}
+
+
+@app.get("/api/mdns/selftest")
+async def api_mdns_selftest(names: str = "") -> dict[str, Any]:
+    """自检「指定域名是否映射到访问地址里的 IP」。
+
+    logic：按响应器匹配规则，本进程会不会应答该域名；
+    actual：从本机 5353 端口真实发一次查询，取实际拿到的 A 记录。
+    两者不一致时（matched=True 但 actual 为空/不同），通常是客户端侧缓存、
+    5353 被占用或网卡组播未加入。
+    """
+    expect = alias_ip()
+    targets: list[str] = []
+    for raw in (names or "").split(","):
+        name = raw.strip().strip(".").lower()
+        if name and name not in targets:
+            targets.append(name)
+    if not targets:
+        targets = [ALIAS_HOST, WEB_SUFFIX]
+        for item in decorate_all(db.list_apps())[:8]:
+            targets.append(f"{item['slug']}.{WEB_SUFFIX}")
+
+    logic = {name: (MDNS.match(name) if MDNS else None) for name in targets}
+    try:
+        actual = await mdns_mod.probe(targets)
+    except Exception as exc:  # 自检失败不影响结论输出
+        log.warning("mDNS 自检查询失败：%s", exc)
+        actual = {}
+
+    items = [
+        {
+            "name": name,
+            "matched": bool(logic.get(name)),
+            "expect": expect,
+            "actual": actual.get(name) or "",
+            "ok": bool(expect) and actual.get(name) == expect,
+        }
+        for name in targets
+    ]
+    return {
+        "ok": bool(items) and all(item["ok"] for item in items),
+        "expect_ip": expect,
+        "suffixes": list(MDNS.suffixes) if MDNS else [WEB_SUFFIX, ALIAS_HOST],
+        "mdns": mdns_snapshot(),
+        "items": items,
+    }
 
 
 # ---------------------------------------------------------------- 静态前端
