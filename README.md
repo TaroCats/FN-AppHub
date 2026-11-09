@@ -2,8 +2,8 @@
 
 把本机所有 Docker 应用的 Web 入口聚合成一个页面，自动扫描容器暴露端口，支持在应用内直接内嵌浏览。
 
-- 当前版本：1.0.17
-- 安装包：`apphub_1.0.17.fpk`（飞牛应用中心 / FnDepot 均可安装）
+- 当前版本：1.0.18
+- 安装包：`apphub_1.0.18.fpk`（飞牛应用中心 / FnDepot 均可安装）
 - 端口：9080（host 网络）
 - 数据目录：`/var/apps/apphub/shares/apphub/data`（SQLite 数据库 `apphub.db`）
 
@@ -91,6 +91,11 @@ python3 scripts/gen_fnpack.py --version 1.0.13 \
 ```
 
 > `fnpack.json` 中的 `sha256` 必须与 Release 上的 fpk 完全一致，否则 FnDepot 会校验失败并跳过该版本。请始终让工作流生成，不要手工编造哈希。
+
+## 1.0.18 变更
+
+- **修复子域代理响应头重复**：上游（Kestrel / Jellyfin、Emby 一类应用）自带 `Server`、`Date` 响应头，代理原样透传后 uvicorn 又各写一份，一个响应里出现两个 `date`、两个 `server`。Safari（CFNetwork）遇到重复单值头会判定响应无法解析，直接显示「网页似乎有问题，或者可能已永久移动到新的 Web 地址」。现在 `date` / `server` 列入丢弃名单，并对所有响应头做同名去重（同名只保留第一条）。
+- **修复子域模式相对跳转**：上游返回 `Location: web/index.html` 这类相对地址时，此前原样透传；现在按当前请求路径归一化为根相对地址（如 `/web/index.html`），避免不同客户端解析基准不一致导致跳到错误路径或空白页。
 
 ## 1.0.17 变更
 

@@ -51,7 +51,22 @@ DROP_RESPONSE_HEADERS = {
     "keep-alive",
     "strict-transport-security",
     "public-key-pins",
+    # uvicorn 会自行写入 date / server；透传上游同名单值头会形成重复头，
+    # Safari（CFNetwork）会判定响应无法解析并报「网页似乎有问题」。
+    "date",
+    "server",
 }
+
+def _dedupe_response_headers(pairs: list[tuple[str, str]]) -> dict[str, str]:
+    """丢弃禁用头，且同名头只保留第一条，避免重复单值头让客户端解析失败。"""
+    out: dict[str, str] = {}
+    for key, value in pairs:
+        lower = key.lower()
+        if lower in DROP_RESPONSE_HEADERS or lower in out:
+            continue
+        out[key] = value
+    return out
+
 
 CLIENT = httpx.AsyncClient(
     follow_redirects=False,
@@ -262,13 +277,18 @@ def _rewrite_location(location: str, base: str, prefix: str, path: str = "/") ->
     return prefix + joined
 
 
-def _rewrite_location_root(location: str, base: str) -> str:
-    """子域模式：绝对地址去掉真实 origin，相对地址原样保留。"""
+def _rewrite_location_root(location: str, base: str, path: str = "/") -> str:
+    """子域模式：绝对地址去掉真实 origin；相对地址按当前路径归一化为根相对路径。"""
     if not location:
         return location
     if location.startswith(base):
         return location[len(base):] or "/"
-    return location
+    if location.startswith("//"):
+        return location
+    if location.startswith("/"):
+        return location
+    current = path if path.endswith("/") or not path else path.rsplit("/", 1)[0] + "/"
+    return posixpath.normpath("/" + current.lstrip("/") + location)
 
 
 def build_target_url(
@@ -362,15 +382,13 @@ async def proxy_http(
         except LookupError:
             text = raw.decode("utf-8", errors="replace")
         text = _rewrite_text_root(text, origin) if root_mode else _rewrite_text(text, prefix, origin)
-        out_headers = {
-            k: v for k, v in upstream.headers.items() if k.lower() not in DROP_RESPONSE_HEADERS
-        }
+        out_headers = _dedupe_response_headers(list(upstream.headers.multi_items()))
         out_headers["content-type"] = content_type if "charset" in content_type else content_type + "; charset=utf-8"
         out_headers.update(debug_headers)
         location = upstream.headers.get("location")
         if location:
             out_headers["location"] = (
-                _rewrite_location_root(location, origin)
+                _rewrite_location_root(location, origin, path)
                 if root_mode
                 else _rewrite_location(location, origin, prefix, path)
             )
@@ -389,14 +407,12 @@ async def proxy_http(
         log.debug("proxy <- %s %s %s (%sB)", upstream.status_code, request.method, path, len(text))
         return response
 
-    out_headers = {
-        k: v for k, v in upstream.headers.items() if k.lower() not in DROP_RESPONSE_HEADERS
-    }
+    out_headers = _dedupe_response_headers(list(upstream.headers.multi_items()))
     out_headers.update(debug_headers)
     location = upstream.headers.get("location")
     if location:
         out_headers["location"] = (
-            _rewrite_location_root(location, origin)
+            _rewrite_location_root(location, origin, path)
             if root_mode
             else _rewrite_location(location, origin, prefix, path)
         )
