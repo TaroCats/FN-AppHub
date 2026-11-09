@@ -39,6 +39,36 @@ function escapeHtml(str) {
   return String(str || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/* 复制文本：非安全上下文（http + IP 访问）下 navigator.clipboard 不可用，回退 execCommand */
+async function copyText(text) {
+  const value = String(text || '');
+  if (!value) throw new Error('内容为空');
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch (e) { /* 继续走回退 */ }
+  }
+  const ta = document.createElement('textarea');
+  ta.value = value;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '-9999px';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, value.length);
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch (e) {
+    ok = false;
+  }
+  document.body.removeChild(ta);
+  if (!ok) throw new Error('浏览器拒绝写入剪贴板');
+  return true;
+}
+
 function hostOf(url) {
   try {
     const u = new URL(url);
@@ -301,14 +331,17 @@ function openApp(app) {
     return;
   }
   state.current = app;
+  /* 内嵌默认走同源 /p/ 反代：客户端不配 hosts 也能直接打开；
+     用户在窗口内点「直连」才用原始地址（本次会话内生效） */
+  const inlineMode = state.directOverride ? 'direct' : 'proxy';
   $('#viewer-name').textContent = app.name;
-  $('#viewer-url').textContent = frameUrlOf(app);
+  $('#viewer-url').textContent = inlineMode === 'direct' ? openUrl(app) : frameUrlOf(app);
   document.querySelectorAll('#viewer-mode button').forEach((b) => {
-    b.classList.toggle('active', b.dataset.mode === (app.mode || 'proxy'));
+    b.classList.toggle('active', b.dataset.mode === inlineMode);
   });
   viewer.hidden = false;
   document.body.style.overflow = 'hidden';
-  loadFrame(app, app.mode || 'proxy');
+  loadFrame(app, inlineMode);
 }
 
 const HINT_TEXT = {
@@ -348,7 +381,7 @@ function loadFrame(app, mode) {
   loadFrame._t = setTimeout(() => {
     if (!viewer.hidden) showViewerHint('slow');
   }, 8000);
-  if (mode === 'proxy') {
+  if (mode === 'proxy' && /^https?:\/\//i.test(src)) {
     probeSubdomain(src).then((ok) => {
       if (!ok && !viewer.hidden && state.current === app) showViewerHint('resolve');
     });
@@ -360,6 +393,7 @@ function closeViewer() {
   frame.src = 'about:blank';
   document.body.style.overflow = '';
   state.current = null;
+  state.directOverride = false;
   clearTimeout(loadFrame._t);
 }
 
@@ -384,7 +418,7 @@ $('#hint-hosts').addEventListener('click', async () => {
   try {
     const info = debugInfo || (await api('/api/debug'));
     debugInfo = info;
-    await navigator.clipboard.writeText(info.hosts || '');
+    await copyText(info.hosts || '');
     toast('hosts 片段已复制');
   } catch (err) {
     toast('复制失败：请打开右上角「调试」面板手动复制');
@@ -398,7 +432,9 @@ document.querySelectorAll('#viewer-mode button').forEach((btn) => {
     if (!state.current) return;
     document.querySelectorAll('#viewer-mode button').forEach((b) => b.classList.remove('active'));
     btn.classList.add('active');
+    state.directOverride = btn.dataset.mode === 'direct';
     loadFrame(state.current, btn.dataset.mode);
+    if (state.directOverride) toast('直连模式：客户端需能解析该地址（hosts/DNS）');
     saveModeAsDefault(state.current, btn.dataset.mode);
   });
 });
@@ -494,7 +530,8 @@ function openUrl(app) {
    避免客户端 DNS 被代理/隧道接管时 .local 解析被拖慢数秒 */
 function frameUrlOf(app) {
   if (!app) return 'about:blank';
-  if (app.frame_url) return app.frame_url;
+  /* 优先同源 /p/ 反代：客户端未配 hosts 时也能正常加载 */
+  if (app.frame_path) return app.frame_path;
   return `/p/${app.id}${homePath(app) || '/'}`;
 }
 
@@ -640,7 +677,7 @@ $('#host-copy-hosts').addEventListener('click', async () => {
     const resp = await fetch('/api/hosts', { cache: 'no-store' });
     const text = await resp.text();
     if (!text.trim()) return toast('hosts 片段为空：先在下方保存映射 IP');
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     toast('hosts 片段已复制，粘到 /etc/hosts 即可');
   } catch (err) {
     toast(`复制失败：${err.message || err}`);
@@ -1418,7 +1455,7 @@ $('#debug-copy-hosts').addEventListener('click', async () => {
   const text = (debugInfo && debugInfo.hosts) || '';
   if (!text) return;
   try {
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     toast('hosts 片段已复制');
   } catch (err) {
     toast('复制失败，请手动选择日志面板中的地址');

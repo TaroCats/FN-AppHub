@@ -186,12 +186,24 @@ def ensure_slug(app_row: dict[str, Any]) -> str:
     return slug
 
 
+def frame_path(app_id: int, home_path: str = "") -> str:
+    """内嵌加载用的同源路径：/p/<id>/...，不依赖任何 DNS/hosts 解析。"""
+    path = (home_path or "").strip()
+    if not path or path == "/":
+        path = "/"
+    elif not path.startswith("/"):
+        path = "/" + path
+    return f"/p/{app_id}{path}"
+
+
 def decorate(app_row: dict[str, Any]) -> dict[str, Any]:
-    """给应用补齐子域字段，前端直接用 frame_url 加载 iframe。"""
+    """给应用补齐子域字段与同源内嵌路径。"""
     slug = ensure_slug(app_row)
     app_row["slug"] = slug
     app_row["frame_origin"] = frame_origin(slug)
     app_row["frame_url"] = frame_url(slug, app_row.get("home_path") or "")
+    # 内嵌窗口统一走同源 /p/ 反代，避免客户端没配 hosts 时 iframe 落到错误页
+    app_row["frame_path"] = frame_path(app_row["id"], app_row.get("home_path") or "")
     return app_row
 
 
