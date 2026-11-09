@@ -52,6 +52,7 @@ jobs:
           if not m:
               raise SystemExit('manifest 中未找到 version 字段')
           current = m.group(1)
+          new = current
 
           if bump != 'none':
               parts = [int(x) for x in re.split(r'[.\-+]', current)[:3] if x.isdigit()]
