@@ -27,6 +27,7 @@ MCAST_PORT = 5353
 QTYPE_A = 1
 QTYPE_AAAA = 28
 QTYPE_ANY = 255
+QTYPE_NSEC = 47
 # 映射 IP 随时可能改（换网段、多网卡），TTL 取短值让客户端尽快重新查询
 DEFAULT_TTL = 30
 
@@ -53,17 +54,34 @@ def _encode_name(name: str) -> bytes:
 
 
 def _parse_question(data: bytes, offset: int) -> Optional[tuple[str, int, int, int]]:
-    """解析单个 question，返回 (name, qtype, qclass, 结束偏移)。"""
+    """解析单个 question，返回 (name, qtype, qclass, 结束偏移)。
+
+    macOS 的 mDNSResponder 在同包多 question 时，第二个 question 的名字常用压缩
+    指针（如 A 后跟 `c00c` + AAAA）。必须跟随指针解析，否则该 question 的 name
+    为空、被当成无关域名跳过，AAAA 就永远得不到应答。
+    """
     labels: list[str] = []
     pos = offset
+    end: Optional[int] = None  # 指针后（或根标签后）的 qtype 起始偏移
+    hops = 0
     while pos < len(data):
         length = data[pos]
         if length == 0:
             pos += 1
+            if end is None:
+                end = pos
             break
-        if length & 0xC0 == 0xC0:  # 压缩指针（question 里极少见）
-            pos += 2
-            break
+        if length & 0xC0 == 0xC0:  # 压缩指针
+            if pos + 1 >= len(data):
+                return None
+            ptr = ((length & 0x3F) << 8) | data[pos + 1]
+            if end is None:
+                end = pos + 2
+            hops += 1
+            if hops > 16 or ptr >= len(data):
+                return None
+            pos = ptr
+            continue
         pos += 1
         if pos + length > len(data):
             return None
@@ -74,10 +92,11 @@ def _parse_question(data: bytes, offset: int) -> Optional[tuple[str, int, int, i
         except (UnicodeError, ValueError):
             labels.append(chunk.decode("latin-1", errors="ignore"))
         pos += length
-    if pos + 4 > len(data):
+    qpos = end if end is not None else pos
+    if qpos + 4 > len(data):
         return None
-    qtype, qclass = struct.unpack("!HH", data[pos:pos + 4])
-    return ".".join(labels).lower(), qtype, qclass, pos + 4
+    qtype, qclass = struct.unpack("!HH", data[qpos:qpos + 4])
+    return ".".join(labels).lower(), qtype, qclass, qpos + 4
 
 
 def build_response(
@@ -111,14 +130,86 @@ def build_nodata(
     q_end: int,
     unicast: bool,
     qid: int,
+    name: str = "",
+    ttl: int = DEFAULT_TTL,
 ) -> bytes:
-    """对 AAAA 等无法提供的类型回 NODATA（NOERROR + 0 条回答）。
+    """对 AAAA 等无法提供的类型回「带 NSEC 的否定应答」。
 
-    显式否认比完全不理更快：客户端（尤其 macOS 的 IPv6 优先策略）才不会等到超时。
+    单纯回 NOERROR + 0 条回答（裸 NODATA）在 mDNS 里不构成权威否认：
+    macOS 的 mDNSResponder 收不到 NSEC 会认为「对方还没答完」，继续等重传，
+    getaddrinfo 双栈（A+AAAA）解析因此固定多花约 2.5s，curl 再经一次 302
+    重解析就变成 5s。按 RFC 6762 §6.1，否定应答必须附一条 NSEC 记录，
+    其 type bitmap 只声明「该名字存在 A 记录」，客户端才会立即放弃 AAAA。
     """
     question = query[q_start:q_end]
-    header = struct.pack("!HHHHHH", 0 if not unicast else qid, 0x8400, 1, 0, 0, 0)
-    return header + question
+    if not name:
+        header = struct.pack("!HHHHHH", 0 if not unicast else qid, 0x8400, 1, 0, 0, 0)
+        return header + question
+    # NSEC RDATA：Next Domain Name 不得压缩（RFC 4034 §4.1.1）+ type bitmap
+    # window block 0 / bitmap 长度 1 / 0x40 表示只存在 A（type 1）
+    rdata = _encode_name(name) + b"\x00\x01\x40"
+    answer = (
+        b"\xc0\x0c"
+        + struct.pack(
+            "!HHIH",
+            QTYPE_NSEC,
+            0x0001 if unicast else 0x8001,
+            max(1, int(ttl)),
+            len(rdata),
+        )
+        + rdata
+    )
+    header = struct.pack("!HHHHHH", 0 if not unicast else qid, 0x8400, 1, 1, 0, 0)
+    return header + question + answer
+
+
+def _a_record(name: str, ip: str, unicast: bool, ttl: int = DEFAULT_TTL) -> bytes:
+    """单条 A 资源记录（名字完整编码，合并应答时不依赖压缩指针偏移）。"""
+    return (
+        _encode_name(name)
+        + struct.pack(
+            "!HHIH", QTYPE_A, 0x0001 if unicast else 0x8001, max(1, int(ttl)), 4
+        )
+        + socket.inet_aton(ip)
+    )
+
+
+def _nsec_record(name: str, unicast: bool, ttl: int = DEFAULT_TTL) -> bytes:
+    """单条 NSEC 资源记录：声明该名字只存在 A，不存在 AAAA。"""
+    rdata = _encode_name(name) + b"\x00\x01\x40"
+    return (
+        _encode_name(name)
+        + struct.pack(
+            "!HHIH",
+            QTYPE_NSEC,
+            0x0001 if unicast else 0x8001,
+            max(1, int(ttl)),
+            len(rdata),
+        )
+        + rdata
+    )
+
+
+def build_answers(
+    questions: list[bytes], records: list[bytes], unicast: bool, qid: int
+) -> bytes:
+    """把同一次查询内所有 question 的应答合并成一个包。
+
+    macOS 的 mDNSResponder 对一次查询只接受第一个应答包：A 与 AAAA 若各回一个包，
+    后面那个（NSEC 否定应答）会被丢弃，AAAA 分支照样等满 2.5s。合并成一个包、
+    question 与 answer 一一对应，双栈解析才能立即拿到结论。
+    """
+    flags = 0x8400  # QR=1, AA=1
+    header = struct.pack(
+        "!HHHHHH",
+        0 if not unicast else qid,
+        flags,
+        len(questions),
+        len(records),
+        0,
+        0,
+    )
+    return header + b"".join(questions) + b"".join(records)
 
 
 def build_announce(names: Iterable[str], ip: str, ttl: int = DEFAULT_TTL) -> bytes:
@@ -260,6 +351,10 @@ class MDNSResponder(asyncio.DatagramProtocol):
     def _handle(self, data: bytes, qid: int, qdcount: int, addr) -> None:
         offset = 12
         ip: Optional[str] = None
+        questions: list[bytes] = []
+        records: list[bytes] = []
+        names: list[str] = []
+        unicast = False
         for _ in range(min(qdcount, 8)):
             q_start = offset
             parsed = _parse_question(data, offset)
@@ -271,10 +366,15 @@ class MDNSResponder(asyncio.DatagramProtocol):
             if not self._match(name):
                 continue
             # QU 位（0x8000）置位或来源端口不是 5353 时，单播回给查询方
-            unicast = bool(qclass & 0x8000) or addr[1] != MCAST_PORT
+            qu = bool(qclass & 0x8000) or addr[1] != MCAST_PORT
+            # question 段一律用完整名字重编码：原查询里的压缩指针在新包里偏移会失效
+            question = _encode_name(name) + struct.pack("!HH", qtype, qclass)
             if qtype == QTYPE_AAAA:
-                # 本服务只有 IPv4：明确回 NODATA，避免客户端等 IPv6 超时
-                self._reply(build_nodata(data, q_start, offset, unicast, qid), name, None, unicast, addr)
+                # 本服务只有 IPv4：明确回带 NSEC 的权威否定，客户端立即放弃 AAAA
+                questions.append(question)
+                records.append(_nsec_record(name, qu, self.ttl))
+                names.append(name)
+                unicast = unicast or qu
                 continue
             if qtype not in (QTYPE_A, QTYPE_ANY):
                 continue
@@ -283,11 +383,20 @@ class MDNSResponder(asyncio.DatagramProtocol):
             if not ip:
                 log.debug("mDNS 跳过 %s：访问地址里没有可用 IPv4", name)
                 continue
-            self._reply(
-                build_response(data, q_start, offset, ip, unicast, qid, self.ttl),
-                name, ip, unicast, addr,
-            )
-        # 不提前 return：同一个包里的多个 question（A + AAAA）都要逐一应答
+            questions.append(question)
+            records.append(_a_record(name, ip, qu, self.ttl))
+            names.append(name)
+            unicast = unicast or qu
+        if not records:
+            return
+        # 同一查询的 A + AAAA 必须合并成一个包回，拆包会让 NSEC 被客户端丢弃
+        self._reply(
+            build_answers(questions, records, unicast, qid),
+            ",".join(names),
+            ip,
+            unicast,
+            addr,
+        )
 
     def _reply(self, packet: bytes, name: str, ip: Optional[str], unicast: bool, addr) -> None:
         if self.transport is None:
