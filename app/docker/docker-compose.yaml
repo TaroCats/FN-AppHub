@@ -1,0 +1,23 @@
+services:
+  apphub:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: apphub:1.0.13
+    container_name: apphub
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TZ: Asia/Shanghai
+      APPHUB_PORT: "9080"
+      APPHUB_DATA: /app/data
+      APPHUB_STATIC: /app/static
+      APPHUB_PROBE_TIMEOUT: "2.5"
+      DOCKER_SOCK: /var/run/docker.sock
+    volumes:
+      - /var/apps/apphub/shares/apphub/data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"

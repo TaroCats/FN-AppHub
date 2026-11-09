@@ -1,0 +1,19 @@
+# 打包产物
+*.fpk
+dist/
+
+# 构建辅助
+.version
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 本地数据
+*.db
+apphub-db-backup.db
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/

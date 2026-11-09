@@ -1,0 +1,13 @@
+appname               = apphub
+version               = 1.0.13
+display_name          = 应用聚合中心
+desc                  = <p>把本机 Docker 应用聚合成一个入口：自动扫描容器暴露的端口，一键收录，并支持在应用内直接内嵌浏览（无需切换标签页）。</p><p><b>核心能力：</b>Docker 端口扫描与批量导入、手动新增/编辑访问列表、分组与搜索、反向代理内嵌浏览、图标自动抓取。</p><p><b>技术栈：</b>FastAPI + SQLite + 原生前端</p>
+platform              = x86
+source                = thirdparty
+service_port          = 9080
+checkport             = true
+os_min_version        = 1.1.3100
+maintainer            = TaroCats
+distributor           = TaroCats
+desktop_uidir         = ui
+desktop_applaunchname = apphub.Application

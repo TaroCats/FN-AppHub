@@ -1,0 +1,44 @@
+{
+  "schema_version": "2",
+  "source_info": {
+    "name": "AppHub 第三方源",
+    "author": "TaroCats",
+    "homepage": "https://github.com/TaroCats/FN-AppHub",
+    "description": "飞牛 fnOS 应用聚合中心 AppHub 的第三方更新源，可直接在 FnDepot 中安装与升级。"
+  },
+  "apps": {
+    "apphub": {
+      "display_name": "应用聚合中心",
+      "desc": "<p>把本机 Docker 应用聚合成一个入口：自动扫描容器暴露的端口，一键收录，并支持在应用内直接内嵌浏览（无需切换标签页）。</p><p><b>核心能力：</b>Docker 端口扫描与批量导入、手动新增/编辑访问列表、分组与搜索、反向代理内嵌浏览、图标自动抓取。</p><p><b>技术栈：</b>FastAPI + SQLite + 原生前端</p>",
+      "platform": [
+        "x86"
+      ],
+      "categories": [
+        "系统工具"
+      ],
+      "icon_url": "https://github.com/TaroCats/FN-AppHub/raw/main/assets/apphub.png",
+      "readme_url": "https://github.com/TaroCats/FN-AppHub#readme",
+      "bug_report_url": "https://github.com/TaroCats/FN-AppHub/issues",
+      "maintainer": "TaroCats",
+      "distributor": "TaroCats",
+      "run_as": "package",
+      "install_type": "",
+      "is_docker": true,
+      "service_port": "9080",
+      "releases": {
+        "1.0.13": {
+          "os_min_version": "1.1.3100",
+          "updated_at": "2026-11-09T17:11:01+08:00",
+          "changelog": "- **访问地址改为两种填写方式**（编辑弹窗顶部单选）：\n  - `统一配置`（默认）：只需填协议与端口，主机自动跟随主面板「访问地址」/ 扫描抽屉选定的 IP，保存时拼成 `http://IP:端口`；主面板换 IP 后，这类应用地址会一起改，不用逐个编辑。\n  - `自定义`：直接填完整地址（可带协议、域名、端口、路径），与主面板主机无关。\n- **编辑弹窗地址区重排**：统一配置下为 `协议下拉 + 主机（只读）+ 端口`，下方实时预览「将保存为 http://…:端口」；切到自定义时自动把当前地址带入输入框。\n- **新增「主页地址」字段（选填）**：主页在子路径（如 `/admin`）时直接填 `/admin`，点卡片、新窗口、内嵌代理都会带上该路径（内嵌为 `/p/{id}/admin`），卡片副标题显示 `IP:端口/路径`。\n- **后端结构升级**：`apps` 表新增 `url_mode` / `port` / `home_path`，旧库启动自动迁移；统一配置模式支持只填端口，由服务端按已记录主机兜底拼接。\n- **面板改主机同步生效**：主面板「访问地址」写入服务端 `base_host`，统一配置模式的应用批量跟随。",
+          "packages": {
+            "all": {
+              "download_url": "https://github.com/TaroCats/FN-AppHub/releases/download/v1.0.13/apphub_1.0.13.fpk",
+              "sha256": "4993cd73e2e3a069ba1f9c7e7acf3539d1775522bf146a76b6a698dade82e26c",
+              "size": 93008
+            }
+          }
+        }
+      }
+    }
+  }
+}

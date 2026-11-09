@@ -1,0 +1,187 @@
+name: Build FPK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: '版本号递增方式（none 表示沿用 manifest 中的版本）'
+        required: true
+        default: none
+        type: choice
+        options: [none, patch, minor, major]
+
+concurrency:
+  group: build-fpk-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  FNPACK_VERSION: '1.2.3'
+  FNPACK_URL: 'https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64'
+  IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+
+jobs:
+  build:
+    name: 打包并校验
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 确定并同步版本号
+        id: ver
+        env:
+          BUMP: ${{ github.event.inputs.bump || 'none' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, pathlib
+
+          bump = os.environ.get('BUMP', 'none') or 'none'
+          manifest = pathlib.Path('manifest')
+          text = manifest.read_text(encoding='utf-8')
+          m = re.search(r'(?m)^version\s*=\s*(\S+)\s*$', text)
+          if not m:
+              raise SystemExit('manifest 中未找到 version 字段')
+          current = m.group(1)
+
+          if bump != 'none':
+              parts = [int(x) for x in re.split(r'[.\-+]', current)[:3] if x.isdigit()]
+              while len(parts) < 3:
+                  parts.append(0)
+              if bump == 'major':
+                  parts = [parts[0] + 1, 0, 0]
+              elif bump == 'minor':
+                  parts = [parts[0], parts[1] + 1, 0]
+              else:
+                  parts = [parts[0], parts[1], parts[2] + 1]
+              new = '.'.join(str(p) for p in parts)
+              text = re.sub(r'(?m)^version\s*=.*$', 'version               = ' + new, text)
+              manifest.write_text(text, encoding='utf-8')
+
+          # compose 中的镜像 tag 与 manifest 版本保持一致
+          compose = pathlib.Path('app/docker/docker-compose.yaml')
+          ctext = compose.read_text(encoding='utf-8')
+          ctext = re.sub(r'(?m)^(\s*image:\s*apphub:).*$', r'\g<1>' + new, ctext)
+          compose.write_text(ctext, encoding='utf-8')
+
+          pathlib.Path('.version').write_text(new, encoding='utf-8')
+          print('version=' + new)
+          PY
+          VERSION="$(cat .version)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "版本号：${VERSION}"
+
+      - name: 安装 fnpack
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          for i in 1 2 3; do
+            if curl -fsSL --retry 3 --connect-timeout 20 -o "$RUNNER_TEMP/bin/fnpack" "$FNPACK_URL"; then
+              break
+            fi
+            echo "下载 fnpack 失败，第 $i 次重试..."
+            sleep 5
+          done
+          chmod +x "$RUNNER_TEMP/bin/fnpack"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/fnpack" --help | head -3
+
+      - name: 打包 FPK
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.ver.outputs.version }}'
+          fnpack build
+          ls -l ./*.fpk
+          mkdir -p dist
+          mv ./*.fpk "dist/apphub_${VERSION}.fpk"
+          SIZE=$(stat -c '%s' "dist/apphub_${VERSION}.fpk")
+          SHA=$(sha256sum "dist/apphub_${VERSION}.fpk" | awk '{print $1}')
+          echo "FPK 大小：${SIZE} 字节"
+          echo "SHA256：${SHA}"
+
+      - name: 校验 FPK 内容
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.ver.outputs.version }}'
+          TMP=$(mktemp -d)
+          tar -xf "dist/apphub_${VERSION}.fpk" -C "$TMP"
+          test -f "$TMP/manifest"
+          grep -q "^appname" "$TMP/manifest"
+          grep -q "version *= *${VERSION}" "$TMP/manifest"
+          echo "包内 manifest 校验通过："
+          grep -E '^(appname|version|platform)' "$TMP/manifest"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: apphub-fpk-${{ steps.ver.outputs.version }}
+          path: dist/*.fpk
+          if-no-files-found: error
+
+      - name: 更新 fndepot 源索引 fnpack.json
+        if: env.IS_RELEASE == 'true'
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.ver.outputs.version }}'
+          python3 scripts/gen_fnpack.py \
+            --version "$VERSION" \
+            --fpk "dist/apphub_${VERSION}.fpk" \
+            --download-url "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/apphub_${VERSION}.fpk"
+          python3 -m json.tool fnpack.json > /dev/null
+          echo "fnpack.json 已更新："
+          cat fnpack.json
+
+      - name: 提交版本号与源索引并回写 main
+        if: env.IS_RELEASE == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.ver.outputs.version }}'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add manifest app/docker/docker-compose.yaml fnpack.json
+          if git diff --cached --quiet; then
+            echo "没有需要提交的变更"
+          else
+            git commit -m "chore(release): AppHub ${VERSION} [skip ci]"
+          fi
+          git fetch origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            git push origin HEAD:main
+            echo "已回写 main：$(git rev-parse --short HEAD)"
+          else
+            echo "当前提交不在 main 上，跳过回写（请手动同步 manifest / fnpack.json）"
+          fi
+
+      - name: 创建或更新 Release
+        if: env.IS_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.ver.outputs.version }}'
+          TAG="v${VERSION}"
+          python3 scripts/gen_fnpack.py --version "$VERSION" --changelog-out dist/notes.md || true
+          if [ ! -s dist/notes.md ]; then
+            echo "AppHub ${VERSION}" > dist/notes.md
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "dist/apphub_${VERSION}.fpk" --clobber
+            gh release edit "$TAG" --notes-file dist/notes.md
+          else
+            gh release create "$TAG" \
+              --title "AppHub ${VERSION}" \
+              --notes-file dist/notes.md \
+              "dist/apphub_${VERSION}.fpk"
+          fi
+          gh release view "$TAG" --json url,assets --jq '.url'

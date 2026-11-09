@@ -1,0 +1,14 @@
+#!/bin/bash
+# 安装前清理可能残留的同名容器，避免 docker compose 创建时名称/端口冲突
+FILE_PATH="${TRIM_APPDEST}/docker/docker-compose.yaml"
+NAME="apphub"
+if [ -f "$FILE_PATH" ]; then
+    DETECTED=$(grep -E "^\s*container_name" "$FILE_PATH" | head -1 | awk -F ':' '{print $2}' | xargs)
+    [ -n "$DETECTED" ] && NAME="$DETECTED"
+fi
+if command -v docker >/dev/null 2>&1; then
+    if docker inspect "$NAME" >/dev/null 2>&1; then
+        docker rm -f "$NAME" >/dev/null 2>&1
+    fi
+fi
+exit 0
