@@ -30,11 +30,11 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h9M4 18h6"/><path d="M17 12v6M14 15h6"/></svg>
         分组
       </button>
-      <button class="btn ghost" id="btn-host" title="设置 fnos.local 的映射 IP">
+      <button class="btn ghost" id="btn-host" title="设置所有应用使用的局域网 IP">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.2 2.2 3.3 5 3.3 8S14.2 17.8 12 20c-2.2-2.2-3.3-5-3.3-8S9.8 6.2 12 4z"/></svg>
         访问地址
       </button>
-      <button class="btn ghost" id="btn-debug" title="调试模式：查看转发日志与子域映射">
+      <button class="btn ghost" id="btn-debug" title="调试模式：查看运行信息与日志">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6a3 3 0 0 1 6 0"/><rect x="7" y="8" width="10" height="12" rx="5"/><path d="M3 12h4M17 12h4M4 6l3 2M20 6l-3 2M4 18l3-2M20 18l-3-2"/></svg>
         调试
       </button>
@@ -74,10 +74,6 @@
         <span id="viewer-url"></span>
       </div>
       <div class="viewer-tools">
-        <div class="seg" id="viewer-mode">
-          <button data-mode="proxy">内嵌</button>
-          <button data-mode="direct" title="绕开 AppHub 代理，直接用原始地址在窗口内加载">直连</button>
-        </div>
         <button class="icon-btn" id="viewer-reload" title="刷新">
           <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/></svg>
         </button>
@@ -93,8 +89,7 @@
       </div>
     </div>
     <div class="viewer-hint" id="viewer-hint" hidden>
-      <span id="viewer-hint-text">页面加载较慢或被站点拒绝内嵌：切「直连」绕过代理重试，或在新窗口打开。</span>
-      <button class="mini" id="hint-hosts" hidden>复制 hosts</button>
+      <span id="viewer-hint-text">页面加载较慢或被站点拒绝内嵌：用右上角「新窗口」在浏览器里直接打开即可。</span>
       <button class="mini" id="hint-direct">新窗口打开</button>
     </div>
     <iframe id="frame" title="应用预览"></iframe>
@@ -156,7 +151,7 @@
           <option value="auto">统一配置（只填端口）</option>
           <option value="custom">自定义（完整地址）</option>
         </select>
-        <small>统一配置：地址固定为 协议://fnos.local:端口，fnos.local 由 AppHub 映射到顶部「访问地址」保存的 IP，换 IP 只改映射、不动应用；自定义：自己填写完整地址。</small>
+        <small>统一配置：地址固定为 协议://当前局域网IP:端口，换 IP 时在顶部「访问地址」一键重写；自定义：自己填写完整地址。全程直接用 IP 访问，不依赖域名与 hosts。</small>
       </label>
       <div class="field" id="form-auto-field">
         <span>访问地址</span>
@@ -166,11 +161,11 @@
             <option value="https">https</option>
           </select>
           <span class="addr-sep">://</span>
-          <span class="addr-host" id="form-host-label">fnos.local</span>
+          <span class="addr-host" id="form-host-label">192.168.1.10</span>
           <span class="addr-sep">:</span>
           <input id="form-port" inputmode="numeric" placeholder="8096" autocomplete="off">
         </div>
-        <small id="form-url-preview">只填端口即可，地址统一为 fnos.local:端口</small>
+        <small id="form-url-preview">只填端口即可，地址统一为当前局域网 IP:端口</small>
       </div>
       <label class="field" id="form-custom-field" hidden>
         <span>应用地址</span>
@@ -202,14 +197,6 @@
             <option value="window">新窗口打开</option>
           </select>
           <small>内嵌打开：点击卡片在 AppHub 窗口内浏览；新窗口打开：点击卡片直接在浏览器新标签页打开。</small>
-        </label>
-        <label class="field">
-          <span>模式</span>
-          <select name="mode" id="form-inner-mode">
-            <option value="proxy">代理</option>
-            <option value="direct">直连</option>
-          </select>
-          <small>浏览页顶部 tab 的模式，与打开方式互相独立：代理=经 AppHub 反向代理加载，可绕开目标站点的内嵌限制；直连=用应用原始地址直接加载、不经代理，站点禁止被内嵌时会空白。</small>
         </label>
       </div>
       <label class="field">
@@ -243,16 +230,9 @@
           </select>
           <input id="bulk-host-custom" placeholder="如 nas.lan 或 192.168.1.10" hidden>
         </div>
-        <small>这里只保存 fnos.local 指向哪个 IP，不改任何应用地址；统一配置的应用始终用 fnos.local:端口 访问。</small>
+        <small>这里保存所有统一配置应用共同使用的局域网 IP：保存后应用地址会被重写成 http://该IP:端口，浏览器直接访问。</small>
       </label>
-      <label class="field">
-        <span>客户端 hosts</span>
-        <small>子域路由已改由容器内 nginx 按 Host 完成，mDNS 默认关闭：请把下面这段写入客户端 hosts，app-xx.fnos.local 才能解析到 NAS。</small>
-        <div style="margin-top:8px">
-          <button type="button" class="btn ghost" id="host-copy-hosts">复制 hosts 片段</button>
-        </div>
-      </label>
-      <p class="host-preview" id="host-preview">将把 fnos.local 映射到当前 IP</p>
+      <p class="host-preview" id="host-preview">将把统一配置应用的地址改为当前 IP</p>
       <div class="modal-foot">
         <button type="button" class="btn ghost" id="host-cancel">取消</button>
         <button type="button" class="btn primary" id="host-apply">保存映射</button>
@@ -309,14 +289,9 @@
       <input id="debug-q" placeholder="过滤关键字，如 app-12、502、set-cookie" autocomplete="off">
     </div>
     <div class="debug-meta" id="debug-meta"></div>
-    <div class="mdns-result" id="mdns-selftest-result" hidden></div>
     <div class="log-list" id="log-list"></div>
     <footer class="drawer-foot">
-      <span id="debug-hosts-tip">mDNS 正在解析面板地址</span>
-      <div>
-        <button class="btn ghost" id="debug-mdns-test">mDNS 自检</button>
-        <button class="btn ghost" id="debug-copy-hosts">复制 hosts</button>
-      </div>
+      <span id="debug-hosts-tip">所有应用均为 IP 直连</span>
     </footer>
   </aside>
 

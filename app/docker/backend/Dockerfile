@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app/backend
 
-# nginx 负责按 Host 把 <slug>.fnos.local 映射到各应用端口；curl 供健康检查使用
+# nginx 只托管面板端口，应用由浏览器 IP 直连；curl 供健康检查使用
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates nginx \
     && rm -rf /var/lib/apt/lists/* \

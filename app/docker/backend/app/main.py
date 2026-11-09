@@ -1,8 +1,7 @@
 """AppHub — 飞牛应用聚合中心 后端入口。
 
-内嵌访问采用「子域反代」：每个应用独占 app-xx.fnos.local:9080，
-根路径原样转发到目标应用，避免 /p/{id}/ 前缀模式在绝对路径应用上 404。
-子域由内置 mDNS 响应器在局域网内解析（*.fnos.local -> NAS IP）。
+所有应用统一按 http://<局域网IP>:端口 直连访问：不使用域名、hosts、mDNS，
+也不做子域路由与 /p/ 同源代理（面板只负责收录与跳转）。
 """
 from __future__ import annotations
 
@@ -18,35 +17,30 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, WebSocket
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator, model_validator
 
 from . import db, logbuf, webconf
-from . import mdns as mdns_mod
+from .netinfo import local_ipv4_addrs
 from .docker_scan import probe as probe_url
 from .docker_scan import normalize_host
 from .docker_scan import scan as docker_scan
-from .proxy import proxy_http, proxy_websocket
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(os.environ.get("APPHUB_STATIC", "/app/static"))
 SELF_PORT = os.environ.get("APPHUB_PORT", "9080")
 
-# 统一配置应用的固定主机名：应用地址只保存 http://fnos.local:端口，
-# 真实 IP 通过 /etc/hosts 映射 + 内置 mDNS，换 IP 时只改映射，不动任何应用地址。
-ALIAS_HOST = (os.environ.get("APPHUB_ALIAS_HOST", "fnos.local").strip().lower() or "fnos.local")
-# 子域后缀：app-12.<WEB_SUFFIX>:<SELF_PORT>
-WEB_SUFFIX = (os.environ.get("APPHUB_WEB_SUFFIX", ALIAS_HOST).strip(".").lower() or ALIAS_HOST)
-HOSTS_FILE = Path(os.environ.get("APPHUB_HOSTS_FILE", "/etc/hosts"))
-HOSTS_MARK = "# apphub-managed"
+# 统一访问主机：不再使用域名，也不做任何反向代理。
+# 应用地址直接保存为 http://<局域网IP>:端口，浏览器按「IP 直连」访问，
+# 不依赖 hosts、mDNS、子域路由，也不用 /p/ 同源代理。
+DEFAULT_LOCAL_IP = "127.0.0.1"
 
 logbuf.setup(db.DATA_DIR, os.environ.get("APPHUB_LOG_LEVEL", "INFO"))
 log = logging.getLogger("apphub")
 
 DEBUG = False
-MDNS: Optional[mdns_mod.MDNSResponder] = None
 
 app = FastAPI(title="AppHub", docs_url=None, redoc_url=None)
 
@@ -79,53 +73,44 @@ async def _access_log(request: Request, call_next):  # noqa: ANN001
     return response
 
 
-def _to_alias_url(url: str, port: str = "") -> str:
-    """把地址收敛成统一的别名地址：协议沿用原地址，主机固定为 ALIAS_HOST。"""
+def access_ip() -> str:
+    """统一访问 IP：优先「访问地址」保存的 IPv4，否则自动探测局域网 IP。
+
+    域名方案已废弃：地址里直接写 IP，浏览器直连，不做 hosts / mDNS / 子域。
+    """
+    return _as_ipv4(normalize_host(db.get_setting("base_host", ""))) or _as_ipv4(local_ip())
+
+
+def _to_ip_url(url: str, port: str = "") -> str:
+    """把地址收敛成 IP 直连地址：协议沿用原地址，主机固定为当前局域网 IP。"""
     raw = (url or "").strip()
     scheme = "http"
     real_port = str(port or "").strip()
+    fallback_host = ""
     if raw:
         parsed = urlparse(raw if "://" in raw else "http://" + raw)
         scheme = parsed.scheme or "http"
+        fallback_host = parsed.hostname or ""
         if not real_port:
             try:
                 real_port = str(parsed.port or "")
             except ValueError:
                 real_port = ""
-    target = f"{ALIAS_HOST}:{real_port}" if real_port else ALIAS_HOST
+    host = access_ip() or fallback_host
+    if not host:
+        return ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    target = f"{host}:{real_port}" if real_port else host
     return f"{scheme}://{target}"
 
-
-def sync_alias_mapping(host: str) -> str:
-    """把 ALIAS_HOST 指向 host，写入 /etc/hosts（只维护带标记的行）。"""
-    host = normalize_host(host or "")
-    lines: list[str] = []
-    try:
-        if HOSTS_FILE.exists():
-            lines = HOSTS_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except OSError as exc:
-        log.warning("读取 %s 失败：%s", HOSTS_FILE, exc)
-    kept = [line for line in lines if HOSTS_MARK not in line]
-    if host:
-        kept.append(f"{host}\t{ALIAS_HOST}\t{HOSTS_MARK}")
-    try:
-        HOSTS_FILE.write_text("\n".join(kept).rstrip("\n") + "\n", encoding="utf-8")
-        log.info("%s 映射已更新：%s -> %s", ALIAS_HOST, host or "(未设置)", HOSTS_FILE)
-    except OSError as exc:
-        log.warning(
-            "写入 %s 失败（%s）：%s 无法在容器内解析，请在宿主机 hosts 中添加映射",
-            HOSTS_FILE, exc, ALIAS_HOST,
-        )
-    return host
-
-
 def _migrate_auto_urls() -> list[dict[str, Any]]:
-    """统一配置模式的历史地址收敛为别名地址，保证换 IP 时无需改应用。"""
+    """把统一配置模式的应用地址重写为当前局域网 IP:端口（换 IP 后自动收敛）。"""
     changed: list[dict[str, Any]] = []
     for item in db.list_apps():
         if (item.get("url_mode") or "auto") != "auto":
             continue
-        new_url = _to_alias_url(item.get("url", ""), item.get("port", ""))
+        new_url = _to_ip_url(item.get("url", ""), item.get("port", ""))
         if new_url and new_url != item.get("url"):
             db.update_app(item["id"], {"url": new_url})
             changed.append({"id": item["id"], "name": item["name"], "url": new_url})
@@ -133,45 +118,23 @@ def _migrate_auto_urls() -> list[dict[str, Any]]:
 
 
 def _apply_base_host(host: str) -> str:
-    """保存映射 IP：写库 + 更新 hosts，并收敛统一配置模式的应用地址。"""
+    """保存「访问地址」里的局域网 IP，并把统一配置模式的应用地址改成该 IP。"""
     host = normalize_host(host or "")
     if host:
         db.set_setting("base_host", host)
-        sync_alias_mapping(host)
         _migrate_auto_urls()
-        # 映射 IP 变了就立刻通告，客户端不必等旧记录 TTL 过期
-        if MDNS is not None:
-            MDNS.announce()
-            log.info("访问地址已更新为 %s，mDNS 应答 IP %s", host, alias_ip() or "未获取")
+        log.info("访问地址已更新为 %s，统一配置应用地址已按该 IP 重写", host)
     webconf.apply()
     return host
 
 
-# ---------------------------------------------------------------- 子域与调试辅助
+# ---------------------------------------------------------------- 应用字段辅助
 
 SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$")
 
 
-def _public_port() -> str:
-    return "" if SELF_PORT in ("", "80") else f":{SELF_PORT}"
-
-
-def frame_origin(slug: str) -> str:
-    """子域访问源：http://app-12.fnos.local:9080"""
-    return f"http://{slug}.{WEB_SUFFIX}{_public_port()}"
-
-
-def frame_url(slug: str, home_path: str = "") -> str:
-    path = (home_path or "").strip()
-    if not path or path == "/":
-        path = "/"
-    elif not path.startswith("/"):
-        path = "/" + path
-    return f"{frame_origin(slug)}{path}"
-
-
 def ensure_slug(app_row: dict[str, Any]) -> str:
-    """保证每个应用有唯一子域标签：默认 app-<id>，可自定义。"""
+    """保证每个应用有唯一标签（仅用于排障展示，不参与路由）。"""
     current = (app_row.get("slug") or "").strip().lower()
     if current and SLUG_RE.match(current):
         return current
@@ -182,28 +145,26 @@ def ensure_slug(app_row: dict[str, Any]) -> str:
         slug = f"app-{app_row['id']}-{suffix}"
     db.update_app(app_row["id"], {"slug": slug})
     app_row["slug"] = slug
-    log.info("应用 %s 分配子域 %s", app_row.get("name"), slug)
     return slug
 
 
-def frame_path(app_id: int, home_path: str = "") -> str:
-    """内嵌加载用的同源路径：/p/<id>/...，不依赖任何 DNS/hosts 解析。"""
-    path = (home_path or "").strip()
+def open_url(app_row: dict[str, Any]) -> str:
+    """应用的实际打开地址：IP:端口 + 主页路径。"""
+    base = (app_row.get("url") or "").rstrip("/")
+    path = (app_row.get("home_path") or "").strip()
     if not path or path == "/":
         path = "/"
     elif not path.startswith("/"):
         path = "/" + path
-    return f"/p/{app_id}{path}"
+    return f"{base}{path}"
 
 
 def decorate(app_row: dict[str, Any]) -> dict[str, Any]:
-    """给应用补齐子域字段与同源内嵌路径。"""
-    slug = ensure_slug(app_row)
-    app_row["slug"] = slug
-    app_row["frame_origin"] = frame_origin(slug)
-    app_row["frame_url"] = frame_url(slug, app_row.get("home_path") or "")
-    # 内嵌窗口统一走同源 /p/ 反代，避免客户端没配 hosts 时 iframe 落到错误页
-    app_row["frame_path"] = frame_path(app_row["id"], app_row.get("home_path") or "")
+    """内嵌与跳转都使用同一个 IP 直连地址，不再提供任何代理路径。"""
+    app_row["slug"] = ensure_slug(app_row)
+    url = open_url(app_row)
+    app_row["frame_origin"] = ""
+    app_row["frame_url"] = url
     return app_row
 
 
@@ -211,25 +172,14 @@ def decorate_all(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [decorate(item) for item in items]
 
 
-def resolve_subdomain(host: str) -> tuple[Optional[dict[str, Any]], str]:
-    """解析 Host：返回 (应用, 标签)；非子域返回 (None, "")。"""
-    host = (host or "").split(":")[0].strip().lower().rstrip(".")
-    if not host or not host.endswith("." + WEB_SUFFIX):
-        return None, ""
-    label = host[: -(len(WEB_SUFFIX) + 1)]
-    if not label or "." in label:
-        return None, ""
-    return db.find_by_slug(label), label
-
-
 def local_ip() -> str:
-    """探测局域网 IP，用于 mDNS 应答。
+    """探测局域网 IP，用于生成应用的访问地址。
 
     不用「连外网看出口地址」的原因：装有 Clash/Tailscale 类工具时，
     那样拿到的是 198.18.x 或 100.x 的虚拟地址，局域网设备无法访问。
     """
     best, best_score = "", -2
-    for _, ip in mdns_mod.local_ipv4_addrs():
+    for _, ip in local_ipv4_addrs():
         if ip.startswith(("198.18.", "198.19.", "169.254.")):
             score = -1
         elif ip.startswith("192.168."):
@@ -260,7 +210,7 @@ _WARNED_HOST = ""
 
 
 def _as_ipv4(value: str) -> str:
-    """把文本收敛成可用作 mDNS 应答的 IPv4；不可用返回空串。"""
+    """把文本收敛成可用作访问地址的 IPv4；不可用返回空串。"""
     text = (value or "").strip().strip("[]")
     try:
         parsed = ipaddress.ip_address(text)
@@ -269,59 +219,6 @@ def _as_ipv4(value: str) -> str:
     if parsed.version != 4 or parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
         return ""
     return str(parsed)
-
-
-def alias_ip() -> str:
-    """mDNS 应答使用的 IP：优先「访问地址」里保存的映射 IP。
-
-    回环地址对局域网设备无意义；填写了域名/IPv6/非法值时同样不能直接拿来应答
-    （以前这里只排除 127.*，一旦存的是域名就会静默不应答），统一回退到探测到的局域网 IP。
-    """
-    global _WARNED_HOST
-    saved = normalize_host(db.get_setting("base_host", ""))
-    if saved:
-        ip = _as_ipv4(saved)
-        if ip:
-            _WARNED_HOST = ""
-            return ip
-        if saved != _WARNED_HOST:
-            _WARNED_HOST = saved
-            log.warning(
-                "访问地址「%s」不是可用的 IPv4，mDNS 改用自动探测的局域网 IP 应答；"
-                "请把「访问地址」填写为局域网 IP（如 192.168.1.10）",
-                saved,
-            )
-    return local_ip()
-
-
-def mdns_snapshot() -> dict[str, Any]:
-    """调试面板用的 mDNS 状态；running/expect_ip 便于判断「域名是否映射到指定 IP」。"""
-    saved = normalize_host(db.get_setting("base_host", ""))
-    expect = alias_ip()
-    snap: dict[str, Any] = {
-        "running": MDNS is not None,
-        "hits": MDNS.hits if MDNS else 0,
-        "ip": expect,
-        "suffix": WEB_SUFFIX,
-        "alias": ALIAS_HOST,
-        "mapped": saved,
-        "source": "访问地址映射 IP" if saved and _as_ipv4(saved) else "自动探测局域网 IP",
-        "apex": True,
-    }
-    if MDNS:
-        snap.update(MDNS.status())
-    return snap
-
-
-def hosts_snippet() -> str:
-    ip = alias_ip() or "<NAS-IP>"
-    # 裸域名（fnos.local）也要列出来：部分客户端不做 mDNS 通配，直接访问面板时会用到
-    names = [WEB_SUFFIX] if WEB_SUFFIX == ALIAS_HOST else [ALIAS_HOST, WEB_SUFFIX]
-    lines = [f"{ip}\t{name}\t# AppHub 面板" for name in names]
-    for item in db.list_apps():
-        slug = ensure_slug(item)
-        lines.append(f"{ip}\t{slug}.{WEB_SUFFIX}\t# {item['name']}")
-    return "\n".join(lines)
 
 
 def apply_debug(enabled: bool) -> None:
@@ -343,10 +240,10 @@ class AppPayload(BaseModel):
     group_name: str = "未分组"
     note: str = ""
     open_mode: str = "inline"
-    mode: str = "proxy"
+    mode: str = "direct"
     color: str = ""
     container: str = ""
-    slug: str = ""            # 子域标签，如 app-12（留空自动分配）
+    slug: str = ""            # 标签，如 app-12（留空自动分配，仅排障展示）
 
     @field_validator("url")
     @classmethod
@@ -386,11 +283,11 @@ class AppPayload(BaseModel):
 
     @model_validator(mode="after")
     def _fill_url(self) -> "AppPayload":
-        """统一配置模式的地址固定为「协议://fnos.local:端口」，真实 IP 靠 hosts 映射。"""
+        """统一配置模式的地址固定为「协议://当前局域网IP:端口」，浏览器直连。"""
         if self.url_mode == "auto":
             if not self.url and not self.port:
                 raise ValueError("统一配置模式下需要填写端口")
-            self.url = _to_alias_url(self.url, self.port)
+            self.url = _to_ip_url(self.url, self.port)
             if not self.port:
                 try:
                     parsed = urlparse(self.url)
@@ -423,13 +320,13 @@ class AppPayload(BaseModel):
     @field_validator("mode")
     @classmethod
     def _normalize_mode(cls, value: str) -> str:
-        """内嵌模式：proxy 走 AppHub 反向代理，direct 直接用原始地址。"""
-        return value if value in ("proxy", "direct") else "proxy"
+        """内嵌方式已统一为 IP 直连：历史 proxy/direct 记录一律归为 direct。"""
+        return "direct"
 
     @field_validator("open_mode")
     @classmethod
     def _normalize_open_mode(cls, value: str) -> str:
-        """打开方式：inline 窗口内打开（可再选内嵌模式），window 新窗口打开。"""
+        """打开方式：inline 窗口内打开，window 新窗口打开。"""
         return value if value in ("inline", "window") else "inline"
 
 
@@ -468,40 +365,18 @@ class GroupReorderPayload(BaseModel):
 
 # ---------------------------------------------------------------- 启动
 
-def _mdns_enabled() -> bool:
-    """mDNS 已不再是必需链路（nginx + hosts 足够），默认关闭，可显式开启。"""
-    return os.environ.get("APPHUB_MDNS", "0").strip().lower() in ("1", "true", "yes", "on")
-
-
 @app.on_event("startup")
 async def _startup() -> None:
-    global MDNS
     db.init_db()
-    # 容器重建后 /etc/hosts 会重置，这里按库中记录的映射 IP 重新写入
-    sync_alias_mapping(db.get_setting("base_host", ""))
     _migrate_auto_urls()
     apply_debug(db.get_setting("debug", "") == "1")
     for item in db.list_apps():
         decorate(item)
-    # Host 映射由容器内 nginx 承担：应用增删改后自动重写 conf 并 reload
     webconf.apply()
-    if _mdns_enabled():
-        try:
-            # 可选：仍公布裸域名与统一后缀，方便不做 hosts 的客户端
-            MDNS = await mdns_mod.start([WEB_SUFFIX, ALIAS_HOST], alias_ip)
-            log.info(
-                "mDNS 应答 %s / *.%s -> %s（来源：%s）",
-                ALIAS_HOST, WEB_SUFFIX, alias_ip() or "未获取到局域网 IP",
-                "访问地址映射 IP" if _as_ipv4(db.get_setting("base_host", "")) else "自动探测局域网 IP",
-            )
-            MDNS.announce()
-        except Exception as exc:  # mDNS 只是便捷解析，失败不影响主功能
-            log.warning("mDNS 未启动：%s", exc)
-    else:
-        log.info(
-            "mDNS 已关闭：子域解析请用面板「复制 hosts」，路由由容器内 nginx 按 Host 完成（%s）",
-            webconf.CONF_PATH,
-        )
+    log.info(
+        "AppHub 以 IP 直连模式运行：应用地址为 http://<局域网IP>:端口（当前 IP %s），不使用域名与反代",
+        access_ip() or "未获取到局域网 IP",
+    )
     asyncio.create_task(_first_run_import())
 
 
@@ -527,7 +402,7 @@ async def _first_run_import() -> None:
             continue
         if str(item["port"]) == SELF_PORT:
             continue
-        alias_url = _to_alias_url(item["url"], str(item.get("port") or ""))
+        alias_url = _to_ip_url(item["url"], str(item.get("port") or ""))
         if db.find_by_url(alias_url) or db.find_by_url(item["url"]):
             continue
         db.create_app(
@@ -540,7 +415,7 @@ async def _first_run_import() -> None:
                 "color": item["suggest_color"],
                 "container": item["container"],
                 "open_mode": "inline",
-                "mode": "proxy",
+                "mode": "direct",
             }
         )
         imported += 1
@@ -558,7 +433,7 @@ async def _first_run_import() -> None:
 async def api_list_apps() -> dict[str, Any]:
     apps = decorate_all(db.list_apps())
     groups = ["全部"] + db.distinct_groups()
-    return {"apps": apps, "groups": groups, "web_suffix": WEB_SUFFIX, "self_port": SELF_PORT}
+    return {"apps": apps, "groups": groups, "self_port": SELF_PORT}
 
 
 @app.post("/api/apps")
@@ -568,7 +443,7 @@ async def api_create_app(payload: AppPayload) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=f"该地址已存在：{existing['name']}")
     data = payload.model_dump()
     if data.get("slug") and db.slug_taken(data["slug"]):
-        raise HTTPException(status_code=409, detail=f"子域已被占用：{data['slug']}")
+        raise HTTPException(status_code=409, detail=f"标签已被占用：{data['slug']}")
     row = decorate(db.create_app(data))
     webconf.apply()
     return row
@@ -578,7 +453,7 @@ async def api_create_app(payload: AppPayload) -> dict[str, Any]:
 async def api_update_app(app_id: int, payload: AppPayload) -> dict[str, Any]:
     data = payload.model_dump(exclude_unset=True)
     if data.get("slug") and db.slug_taken(data["slug"], exclude_id=app_id):
-        raise HTTPException(status_code=409, detail=f"子域已被占用：{data['slug']}")
+        raise HTTPException(status_code=409, detail=f"标签已被占用：{data['slug']}")
     updated = db.update_app(app_id, data)
     if not updated:
         raise HTTPException(status_code=404, detail="应用不存在")
@@ -692,7 +567,7 @@ class RebindPayload(BaseModel):
 
 @app.post("/api/apps/rebind-host")
 async def api_rebind_host(payload: RebindPayload) -> dict[str, Any]:
-    """保存 fnos.local 的映射 IP：统一配置的应用地址保持 fnos.local:端口 不变。"""
+    """保存局域网 IP，并把所有统一配置的应用地址重写为 http://该IP:端口。"""
     host = _apply_base_host(payload.host)
     if not host:
         raise HTTPException(status_code=400, detail="访问地址无效")
@@ -701,8 +576,6 @@ async def api_rebind_host(payload: RebindPayload) -> dict[str, Any]:
     return {
         "ok": True,
         "host": host,
-        "alias": ALIAS_HOST,
-        "mdns": mdns_snapshot(),
         "updated": [{"id": a["id"], "name": a["name"], "url": a["url"]} for a in auto_apps],
         "skipped": 0,
         "conflicts": [],
@@ -726,12 +599,12 @@ class HostSetting(BaseModel):
 
 @app.post("/api/settings/base-host")
 async def api_set_base_host(payload: HostSetting) -> dict[str, Any]:
-    """前端上报映射 IP：写库并更新 fnos.local 的 hosts 映射。"""
+    """前端上报访问地址：写库并把统一配置的应用地址改成该 IP。"""
     host = _apply_base_host(payload.host)
     warning = ""
     if host and not _as_ipv4(host):
-        warning = f"「{host}」不是可用的 IPv4，mDNS 将改用自动探测的局域网 IP 应答"
-    return {"ok": True, "host": host, "alias": ALIAS_HOST, "mdns": mdns_snapshot(), "warning": warning}
+        warning = f"「{host}」不是可用的 IPv4，建议填写局域网 IP（如 192.168.1.10）"
+    return {"ok": True, "host": host, "warning": warning}
 
 
 @app.get("/api/settings/base-host")
@@ -767,10 +640,10 @@ async def api_scan(
 
     apps = db.list_apps()
     existing = {a["url"] for a in apps}
-    existing |= {_to_alias_url(a["url"], a.get("port", "")) for a in apps}
+    existing |= {_to_ip_url(a["url"], a.get("port", "")) for a in apps}
     for item in candidates:
         item.pop("probe_url", None)
-        item["added"] = item["url"] in existing or _to_alias_url(item["url"], item["port"]) in existing
+        item["added"] = item["url"] in existing or _to_ip_url(item["url"], item["port"]) in existing
     return {"items": candidates, "count": len(candidates), "host": base_host}
 
 
@@ -780,7 +653,7 @@ async def api_import(payload: ImportPayload) -> dict[str, Any]:
     skipped = 0
     for item in payload.items:
         port = str(urlparse(item.url if "://" in item.url else "http://" + item.url).port or "")
-        url = _to_alias_url(item.url, port)
+        url = _to_ip_url(item.url, port)
         if db.find_by_url(url) or db.find_by_url(item.url.rstrip("/")):
             skipped += 1
             continue
@@ -794,7 +667,7 @@ async def api_import(payload: ImportPayload) -> dict[str, Any]:
                 "color": item.color,
                 "container": item.container,
                 "open_mode": "inline",
-                "mode": "proxy",
+                "mode": "direct",
             }
         )
         created += 1
@@ -884,34 +757,7 @@ async def api_health() -> dict[str, Any]:
     return {"ok": True, "apps": len(db.list_apps()), "port": SELF_PORT}
 
 
-# ---------------------------------------------------------------- 反向代理
-
-@app.get("/p/{app_id}")
-async def proxy_root(app_id: int, request: Request) -> Response:
-    return RedirectResponse(url=f"/p/{app_id}/", status_code=307)
-
-
-@app.websocket("/p/{app_id}/{path:path}")
-async def ws_route(websocket: WebSocket, app_id: int, path: str) -> None:
-    row = db.get_app(app_id)
-    if not row:
-        await websocket.close(code=1008)
-        return
-    await proxy_websocket(websocket, row, path)
-
-
-@app.api_route(
-    "/p/{app_id}/{path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
-)
-async def proxy_route(app_id: int, path: str, request: Request) -> Response:
-    row = db.get_app(app_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="应用不存在")
-    return await proxy_http(row, request, path)
-
-
-# ---------------------------------------------------------------- 调试与子域
+# ---------------------------------------------------------------- 调试
 
 class DebugPayload(BaseModel):
     enabled: bool = True
@@ -922,9 +768,8 @@ async def api_debug_info() -> dict[str, Any]:
     apps = decorate_all(db.list_apps())
     return {
         "enabled": DEBUG,
-        "suffix": WEB_SUFFIX,
         "self_port": SELF_PORT,
-        "mdns": mdns_snapshot(),
+        "access_ip": access_ip(),
         "nginx": {
             "enabled": webconf.enabled(),
             "conf": str(webconf.CONF_PATH),
@@ -939,11 +784,10 @@ async def api_debug_info() -> dict[str, Any]:
                 "slug": item["slug"],
                 "frame_url": item["frame_url"],
                 "upstream": item["url"],
-                "mode": item.get("mode") or "proxy",
+                "mode": "direct",
             }
             for item in apps
         ],
-        "hosts": hosts_snippet(),
     }
 
 
@@ -965,136 +809,7 @@ async def api_logs_clear() -> dict[str, bool]:
     return {"ok": True}
 
 
-@app.get("/api/subdomains")
-async def api_subdomains() -> dict[str, Any]:
-    items = [
-        {"id": item["id"], "name": item["name"], "slug": item["slug"], "frame_url": item["frame_url"]}
-        for item in decorate_all(db.list_apps())
-    ]
-    return {"suffix": WEB_SUFFIX, "port": SELF_PORT, "items": items, "hosts": hosts_snippet()}
-
-
-@app.get("/api/hosts")
-async def api_hosts() -> Response:
-    return Response(content=hosts_snippet(), media_type="text/plain; charset=utf-8")
-
-
-@app.get("/api/mdns/status")
-async def api_mdns_status() -> dict[str, Any]:
-    """mDNS 运行状态：后缀列表、网卡、应答 IP 及其来源。"""
-    snap = mdns_snapshot()
-    snap["hosts"] = hosts_snippet()
-    return snap
-
-
-@app.post("/api/mdns/announce")
-async def api_mdns_announce() -> dict[str, Any]:
-    """手动触发一次组播通告：客户端仍解析到旧 IP 时用来强制刷新。"""
-    if MDNS is None:
-        raise HTTPException(status_code=503, detail="mDNS 未启动，请检查 5353 端口占用")
-    MDNS.announce()
-    return {"ok": True, "mdns": mdns_snapshot()}
-
-
-@app.get("/api/mdns/selftest")
-async def api_mdns_selftest(names: str = "") -> dict[str, Any]:
-    """自检「指定域名是否映射到访问地址里的 IP」。
-
-    logic：按响应器匹配规则，本进程会不会应答该域名；
-    actual：从本机 5353 端口真实发一次查询，取实际拿到的 A 记录。
-    两者不一致时（matched=True 但 actual 为空/不同），通常是客户端侧缓存、
-    5353 被占用或网卡组播未加入。
-    """
-    expect = alias_ip()
-    targets: list[str] = []
-    for raw in (names or "").split(","):
-        name = raw.strip().strip(".").lower()
-        if name and name not in targets:
-            targets.append(name)
-    if not targets:
-        targets = [ALIAS_HOST, WEB_SUFFIX]
-        for item in decorate_all(db.list_apps())[:8]:
-            targets.append(f"{item['slug']}.{WEB_SUFFIX}")
-
-    logic = {name: (MDNS.match(name) if MDNS else None) for name in targets}
-    try:
-        actual = await mdns_mod.probe(targets)
-    except Exception as exc:  # 自检失败不影响结论输出
-        log.warning("mDNS 自检查询失败：%s", exc)
-        actual = {}
-
-    items = [
-        {
-            "name": name,
-            "matched": bool(logic.get(name)),
-            "expect": expect,
-            "actual": actual.get(name) or "",
-            "ok": bool(expect) and actual.get(name) == expect,
-        }
-        for name in targets
-    ]
-    return {
-        "ok": bool(items) and all(item["ok"] for item in items),
-        "expect_ip": expect,
-        "suffixes": list(MDNS.suffixes) if MDNS else [WEB_SUFFIX, ALIAS_HOST],
-        "mdns": mdns_snapshot(),
-        "items": items,
-    }
-
-
 # ---------------------------------------------------------------- 静态前端
 
 if STATIC_DIR.exists():
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
-
-
-# ---------------------------------------------------------------- 子域入口
-
-class SubdomainDispatcher:
-    """按 Host 分流：app-xx.fnos.local -> 目标应用；其余 -> AppHub 面板。
-
-    放在 ASGI 最外层而不是路由里，才能同时接管 HTTP 与 WebSocket，
-    且不受 StaticFiles("/") 的影响。
-    """
-
-    def __init__(self, panel) -> None:  # noqa: ANN001
-        self.panel = panel
-
-    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
-        if scope.get("type") in ("http", "websocket"):
-            host = ""
-            for key, value in scope.get("headers") or []:
-                if key == b"host":
-                    host = value.decode("latin-1")
-                    break
-            row, label = resolve_subdomain(host)
-            if label:
-                if row is None:
-                    log.warning("未知子域访问 %s", host)
-                    if scope["type"] == "http":
-                        response = JSONResponse(
-                            {"detail": f"未知子域 {label}.{WEB_SUFFIX}，请先在 AppHub 中创建应用"},
-                            status_code=404,
-                        )
-                        await response(scope, receive, send)
-                    else:
-                        await WebSocket(scope, receive, send).close(code=1008)
-                    return
-                path = (scope.get("path") or "/").lstrip("/")
-                if scope["type"] == "http":
-                    started = time.perf_counter()
-                    request = Request(scope, receive)
-                    response = await proxy_http(row, request, path, prefix="")
-                    await response(scope, receive, send)
-                    log.info(
-                        "[%s] %s /%s -> %s %.1fms upstream=%s",
-                        label, request.method, path, response.status_code,
-                        (time.perf_counter() - started) * 1000, row.get("url"),
-                    )
-                else:
-                    await proxy_websocket(WebSocket(scope, receive, send), row, path, prefix="")
-                return
-        await self.panel(scope, receive, send)
-
-
-app = SubdomainDispatcher(app)  # type: ignore[assignment]

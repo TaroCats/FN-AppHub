@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS apps (
     group_name  TEXT    NOT NULL DEFAULT '未分组',
     note        TEXT    NOT NULL DEFAULT '',
     open_mode   TEXT    NOT NULL DEFAULT 'inline',
-    mode        TEXT    NOT NULL DEFAULT 'proxy',
+    mode        TEXT    NOT NULL DEFAULT 'direct',
     color       TEXT    NOT NULL DEFAULT '',
     container   TEXT    NOT NULL DEFAULT '',
     url_mode    TEXT    NOT NULL DEFAULT 'auto',
@@ -69,6 +69,7 @@ def init_db() -> None:
         needs_addr_backfill = False
         for col, ddl in (
             ("url_mode", "ALTER TABLE apps ADD COLUMN url_mode TEXT NOT NULL DEFAULT 'auto'"),
+            ("mode_direct", "UPDATE apps SET mode = 'direct' WHERE mode <> 'direct'"),
             ("port", "ALTER TABLE apps ADD COLUMN port TEXT NOT NULL DEFAULT ''"),
             ("home_path", "ALTER TABLE apps ADD COLUMN home_path TEXT NOT NULL DEFAULT ''"),
             ("slug", "ALTER TABLE apps ADD COLUMN slug TEXT NOT NULL DEFAULT ''"),
@@ -164,7 +165,7 @@ def create_app(data: dict[str, Any]) -> dict[str, Any]:
                 data.get("group_name") or "未分组",
                 data.get("note", ""),
                 data.get("open_mode") or "inline",
-                data.get("mode") or "proxy",
+                data.get("mode") or "direct",
                 data.get("color", ""),
                 data.get("container", ""),
                 data.get("url_mode") or "auto",

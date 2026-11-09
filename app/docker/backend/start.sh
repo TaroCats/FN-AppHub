@@ -1,5 +1,5 @@
 #!/bin/sh
-# AppHub 容器启动：nginx 对外做 Host 映射，uvicorn 退到回环内部端口。
+# AppHub 容器启动：nginx 只托管面板端口，uvicorn 退到回环内部端口。
 # nginx 不可用或配置校验失败时，自动回退到旧模式（uvicorn 直接监听对外端口），
 # 保证面板永远能打开。
 set -u

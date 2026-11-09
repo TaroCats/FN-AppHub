@@ -11,7 +11,6 @@ const state = {
   groupList: [],
   baseHost: '',
   hostSynced: false,
-  webSuffix: 'fnos.local',
   selfPort: '',
   debug: false,
   logTimer: null,
@@ -104,8 +103,10 @@ function addrLabel(app) {
 /* ---- 访问地址（主机）工具 ---- */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0', '::1', '[::1]']);
 const HOST_KEY = 'apphub.host';
-/* 统一配置应用的固定主机名，真实 IP 由服务端 hosts 映射 */
-const ALIAS_HOST = 'fnos.local';
+/* 统一配置应用直接用局域网 IP 访问：不再有域名、hosts、mDNS 与反代 */
+function accessHost() {
+  return state.baseHost || currentHost();
+}
 
 function urlHostname(url) {
   const raw = String(url || '').trim();
@@ -331,34 +332,26 @@ function openApp(app) {
     return;
   }
   state.current = app;
-  /* 内嵌默认走同源 /p/ 反代：客户端不配 hosts 也能直接打开；
-     用户在窗口内点「直连」才用原始地址（本次会话内生效） */
-  const inlineMode = state.directOverride ? 'direct' : 'proxy';
+  /* 内嵌与跳转都直接用应用自己的 IP:端口，不再经过任何代理 */
   $('#viewer-name').textContent = app.name;
-  $('#viewer-url').textContent = inlineMode === 'direct' ? openUrl(app) : frameUrlOf(app);
-  document.querySelectorAll('#viewer-mode button').forEach((b) => {
-    b.classList.toggle('active', b.dataset.mode === inlineMode);
-  });
+  $('#viewer-url').textContent = openUrl(app);
   viewer.hidden = false;
   document.body.style.overflow = 'hidden';
-  loadFrame(app, inlineMode);
+  loadFrame(app);
 }
 
 const HINT_TEXT = {
-  slow: '页面加载较慢或被站点拒绝内嵌：切「直连」绕过代理重试，或在新窗口打开。',
-  resolve: '子域解析失败：本机没查到该域名。请点「复制 hosts」写入系统 hosts，或用 mDNS 设备访问；也可切「直连」。',
+  slow: '页面加载较慢或被站点拒绝内嵌：用右上角「新窗口」在浏览器里直接打开即可。',
 };
 
-function showViewerHint(kind) {
+function showViewerHint() {
   const text = $('#viewer-hint-text');
-  const hostsBtn = $('#hint-hosts');
-  if (text) text.textContent = HINT_TEXT[kind] || HINT_TEXT.slow;
-  if (hostsBtn) hostsBtn.hidden = kind !== 'resolve';
+  if (text) text.textContent = HINT_TEXT.slow;
   $('#viewer-hint').hidden = false;
 }
 
-/* 探活子域：no-cors 下只要能建立连接就算解析成功，DNS/连接失败才会 reject */
-async function probeSubdomain(url) {
+/* 探活直连地址：no-cors 下只要能建立连接就算通 */
+async function probeUrl(url) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 2500);
   try {
@@ -371,19 +364,19 @@ async function probeSubdomain(url) {
   }
 }
 
-function loadFrame(app, mode) {
+function loadFrame(app) {
   const hint = $('#viewer-hint');
   hint.hidden = true;
-  const src = mode === 'direct' ? openUrl(app) : frameUrlOf(app);
-  $('#viewer-url').textContent = mode === 'direct' ? openUrl(app) : frameUrlOf(app);
+  const src = openUrl(app);
+  $('#viewer-url').textContent = src;
   frame.src = src;
   clearTimeout(loadFrame._t);
   loadFrame._t = setTimeout(() => {
-    if (!viewer.hidden) showViewerHint('slow');
+    if (!viewer.hidden) showViewerHint();
   }, 8000);
-  if (mode === 'proxy' && /^https?:\/\//i.test(src)) {
-    probeSubdomain(src).then((ok) => {
-      if (!ok && !viewer.hidden && state.current === app) showViewerHint('resolve');
+  if (/^https?:\/\//i.test(src)) {
+    probeUrl(src).then((ok) => {
+      if (!ok && !viewer.hidden && state.current === app) showViewerHint();
     });
   }
 }
@@ -393,7 +386,6 @@ function closeViewer() {
   frame.src = 'about:blank';
   document.body.style.overflow = '';
   state.current = null;
-  state.directOverride = false;
   clearTimeout(loadFrame._t);
 }
 
@@ -401,8 +393,7 @@ $('#viewer-back').addEventListener('click', closeViewer);
 $('#viewer-close').addEventListener('click', closeViewer);
 $('#viewer-reload').addEventListener('click', () => {
   if (!state.current) return;
-  const mode = document.querySelector('#viewer-mode button.active').dataset.mode;
-  loadFrame(state.current, mode);
+  loadFrame(state.current);
 });
 $('#viewer-open').addEventListener('click', () => {
   if (state.current) window.open(state.current.url, '_blank', 'noopener');
@@ -414,63 +405,10 @@ $('#viewer-full').addEventListener('click', () => {
     document.exitFullscreen().catch(() => {});
   }
 });
-$('#hint-hosts').addEventListener('click', async () => {
-  try {
-    const info = debugInfo || (await api('/api/debug'));
-    debugInfo = info;
-    await copyText(info.hosts || '');
-    toast('hosts 片段已复制');
-  } catch (err) {
-    toast('复制失败：请打开右上角「调试」面板手动复制');
-  }
-});
 $('#hint-direct').addEventListener('click', () => {
   if (state.current) window.open(state.current.url, '_blank', 'noopener');
 });
-document.querySelectorAll('#viewer-mode button').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    if (!state.current) return;
-    document.querySelectorAll('#viewer-mode button').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    state.directOverride = btn.dataset.mode === 'direct';
-    loadFrame(state.current, btn.dataset.mode);
-    if (state.directOverride) toast('直连模式：客户端需能解析该地址（hosts/DNS）');
-    saveModeAsDefault(state.current, btn.dataset.mode);
-  });
-});
 
-/* 内嵌浏览里的切换同时写入默认打开方式，编辑弹窗即显示同一值 */
-async function saveModeAsDefault(app, mode) {
-  const previous = app.mode || 'proxy';
-  if (previous === mode) return;
-  app.mode = mode;
-  try {
-    const updated = await api(`/api/apps/${app.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        name: app.name,
-        url: app.url,
-        url_mode: app.url_mode || 'auto',
-        port: app.port || '',
-        home_path: app.home_path || '',
-        group_name: app.group_name || '未分组',
-        note: app.note || '',
-        open_mode: app.open_mode || 'inline',
-        mode,
-        color: app.color || '',
-        container: app.container || '',
-      }),
-    });
-    Object.assign(app, updated);
-    toast(`默认打开方式已设为${mode === 'direct' ? '直连' : '内嵌浏览'}`);
-  } catch (err) {
-    app.mode = previous;
-    document.querySelectorAll('#viewer-mode button').forEach((b) => {
-      b.classList.toggle('active', b.dataset.mode === previous);
-    });
-    toast(`默认值保存失败：${err.message}`);
-  }
-}
 frame.addEventListener('load', () => {
   $('#viewer-hint').hidden = true;
   clearTimeout(loadFrame._t);
@@ -526,21 +464,10 @@ function openUrl(app) {
   return `${String(app.url || '').replace(/\/+$/, '')}${homePath(app)}`;
 }
 
-/* 内嵌地址：同源路径反代 /p/<id>/，不依赖任何 DNS 查询，
-   避免客户端 DNS 被代理/隧道接管时 .local 解析被拖慢数秒 */
+/* 内嵌地址与服务端返回的 frame_url 完全一致：就是应用的 IP 直连地址 */
 function frameUrlOf(app) {
   if (!app) return 'about:blank';
-  /* 优先同源 /p/ 反代：客户端未配 hosts 时也能正常加载 */
-  if (app.frame_path) return app.frame_path;
-  return `/p/${app.id}${homePath(app) || '/'}`;
-}
-
-/* 子域地址：每个应用独占 app-xx.fnos.local:9080，根路径原样反代（需客户端能解析该子域） */
-function subdomainUrlOf(app) {
-  if (!app) return 'about:blank';
-  const slug = app.slug || `app-${app.id}`;
-  const port = state.selfPort && String(state.selfPort) !== '80' ? `:${state.selfPort}` : '';
-  return `http://${slug}.${state.webSuffix || 'fnos.local'}${port}${homePath(app) || '/'}`;
+  return app.frame_url || openUrl(app);
 }
 
 function initHostPicker() {
@@ -594,23 +521,23 @@ function setUrlMode(mode) {
 }
 
 function refreshAddrPreview() {
-  const mapped = state.baseHost || currentHost();
-  $('#form-host-label').textContent = ALIAS_HOST;
+  const host = accessHost();
+  $('#form-host-label').textContent = host;
   const port = ($('#form-port').value || '').trim();
   const scheme = $('#form-scheme').value;
   $('#form-url-preview').textContent = port
-    ? `将保存为 ${scheme}://${ALIAS_HOST}:${port}，${ALIAS_HOST} 映射到 ${mapped}`
-    : `只填端口即可，地址统一为 ${ALIAS_HOST}:端口（当前映射到 ${mapped}）`;
+    ? `将保存为 ${scheme}://${host}:${port}，浏览器直接访问该 IP`
+    : `只填端口即可，地址统一为当前局域网 IP:端口（${host}）`;
 }
 
 $('#form-url-mode').addEventListener('change', () => {
   const mode = $('#form-url-mode').value;
   if (mode === 'custom') {
-    // 切到自定义时，用别名地址拼一个初始地址方便修改
+    // 切到自定义时，用当前 IP 拼一个初始地址方便修改
     const port = ($('#form-port').value || '').trim();
     const input = $('#form-url');
     if (!input.value.trim() && port) {
-      input.value = `${$('#form-scheme').value}://${ALIAS_HOST}:${port}`;
+      input.value = `${$('#form-scheme').value}://${accessHost()}:${port}`;
     }
   }
   setUrlMode(mode);
@@ -624,19 +551,18 @@ function bulkHost() {
 }
 
 function bulkTargets() {
-  /* 统一配置的应用固定使用 fnos.local，改映射即生效，不需要逐个改地址 */
+  /* 统一配置的应用地址 = http://<访问地址>:端口，换 IP 时整体重写 */
   return state.apps.filter((app) => (app.url_mode || 'auto') === 'auto');
 }
 
 function refreshBulkPreview() {
   const host = bulkHost();
   const targets = bulkTargets();
-  const legacy = targets.filter((app) => urlHostname(app.url).toLowerCase() !== ALIAS_HOST);
   if (!host) {
-    $('#host-preview').textContent = '请填写映射 IP';
+    $('#host-preview').textContent = '请填写局域网 IP';
   } else {
-    $('#host-preview').textContent = `将把 ${ALIAS_HOST} 映射到 ${host}；${targets.length} 个统一配置应用无需改地址`
-      + (legacy.length ? `（其中 ${legacy.length} 个旧地址保存时自动收敛为 ${ALIAS_HOST}）` : '');
+    $('#host-preview').textContent = `将把 ${targets.length} 个统一配置应用的地址改为 http://${host}:对应端口`
+      + '（自定义地址的应用不受影响）';
   }
   $('#host-apply').disabled = !host;
 }
@@ -671,18 +597,6 @@ $('#btn-host').addEventListener('click', openHostModal);
 $('#host-close').addEventListener('click', closeHostModal);
 $('#host-cancel').addEventListener('click', closeHostModal);
 
-/* 子域解析全靠客户端 hosts（mDNS 已默认关闭），入口常显在映射 IP 弹窗里 */
-$('#host-copy-hosts').addEventListener('click', async () => {
-  try {
-    const resp = await fetch('/api/hosts', { cache: 'no-store' });
-    const text = await resp.text();
-    if (!text.trim()) return toast('hosts 片段为空：先在下方保存映射 IP');
-    await copyText(text);
-    toast('hosts 片段已复制，粘到 /etc/hosts 即可');
-  } catch (err) {
-    toast(`复制失败：${err.message || err}`);
-  }
-});
 $('#host-mask').addEventListener('click', closeHostModal);
 $('#bulk-host').addEventListener('change', () => {
   const mode = $('#bulk-host').value;
@@ -708,8 +622,8 @@ $('#host-apply').addEventListener('click', async () => {
     closeHostModal();
     await load();
     initHostPicker();
-    const answerIp = (data.mdns && data.mdns.ip) || state.baseHost;
-    toast(`已把 ${ALIAS_HOST} 映射到 ${state.baseHost}${data.mdns && data.mdns.running ? `，mDNS 应答 ${answerIp}` : ''}`);
+    const count = (data.updated || []).length;
+    toast(`访问地址已设为 ${state.baseHost}，${count} 个应用地址已按该 IP 重写`);
   } catch (err) {
     toast(err.message);
   } finally {
@@ -1116,12 +1030,12 @@ function openModal(app) {
   $('#form-scheme').value = parsed.scheme || 'http';
   $('#form-port').value = app ? (app.port || parsed.port || '') : '';
   $('#form-url').value = app && mode === 'custom' ? app.url : '';
-  $('#form-url').placeholder = `http://${ALIAS_HOST}:端口`;
+  $('#form-url').placeholder = `http://${accessHost()}:端口`;
   $('#form-home-path').value = app ? (app.home_path || '') : '';
   setUrlMode(mode);
   form.group_name.value = app ? app.group_name : '';
   form.open_mode.value = app ? (app.open_mode || 'inline') : 'inline';
-  form.mode.value = app ? (app.mode || 'proxy') : 'proxy';
+  form.mode.value = 'direct';
   form.note.value = app ? app.note || '' : '';
   $('#form-group').value = app && app.group_name && app.group_name !== '未分组' ? app.group_name : '';
   closeGroupPanel();
@@ -1156,7 +1070,7 @@ $('#form').addEventListener('submit', async (event) => {
       $('#form-port').focus();
       return;
     }
-    url = `${$('#form-scheme').value}://${ALIAS_HOST}:${Number(port)}`;
+    url = `${$('#form-scheme').value}://${accessHost()}:${Number(port)}`;
   } else {
     url = ($('#form-url').value || '').trim();
     if (!url) {
@@ -1230,7 +1144,6 @@ async function load() {
     const data = await api('/api/apps');
     state.apps = data.apps || [];
     state.groups = data.groups || [];
-    state.webSuffix = data.web_suffix || state.webSuffix;
     state.selfPort = data.self_port || state.selfPort;
     if (!state.baseHost) {
       try {
@@ -1334,52 +1247,21 @@ async function refreshDebugMeta() {
   try {
     const info = await api('/api/debug');
     debugInfo = info;
-    const mdns = info.mdns || {};
-    const suffixes = (mdns.suffixes && mdns.suffixes.length ? mdns.suffixes : [info.suffix])
-      .map((s) => `<code>${escapeHtml(s)}</code>`).join(' · ');
     const rows = (info.apps || []).map((a) => (
       `<div><code>${escapeHtml(a.frame_url)}</code> → <code>${escapeHtml(a.upstream)}</code></div>`
     )).join('');
     const ngx = info.nginx || {};
     $('#debug-meta').innerHTML = [
-      `域名 ${suffixes} · 端口 <code>${escapeHtml(info.self_port)}</code> · nginx <code>${ngx.enabled ? '已接管' : '未启用'}</code> · mDNS <code>${mdns.running ? '已启动' : '已关闭'}</code>`,
-      ngx.enabled ? `Host 映射：nginx 对外 <code>${escapeHtml(String(ngx.port))}</code> → 面板 <code>127.0.0.1:${escapeHtml(String(ngx.internal_port))}</code>，子域按 Host 直连应用（不必再装 mDNS）` : '',
-      `应答 IP <code>${escapeHtml(mdns.ip || '未获取')}</code>（${escapeHtml(mdns.source || '未知来源')}）· 裸域名 <code>${mdns.apex ? '已接管' : '未接管'}</code> · 命中 <code>${mdns.hits || 0}</code> 次`,
+      `访问 IP <code>${escapeHtml(info.access_ip || '未获取')}</code> · 面板端口 <code>${escapeHtml(String(info.self_port))}</code> · nginx <code>${ngx.enabled ? '已接管面板' : '未启用，面板由 uvicorn 直连'}</code>`,
+      ngx.enabled ? `面板走 <code>${escapeHtml(String(ngx.port))}</code>，应用一律 IP:端口 直连，不经反代` : '',
       `日志文件 <code>${escapeHtml(info.log_file)}</code>`,
       rows,
     ].filter(Boolean).join('<br>');
-    $('#debug-summary').textContent = `调试模式：${info.enabled ? '开启' : '关闭'} · ${(info.apps || []).length} 个子域`;
+    $('#debug-summary').textContent = `调试模式：${info.enabled ? '开启' : '关闭'} · ${(info.apps || []).length} 个应用`;
     $('#debug-toggle').checked = !!info.enabled;
-    $('#debug-hosts-tip').textContent = ngx.enabled
-      ? `子域路由由 nginx 承担，${info.suffix} 与 app-*.${info.suffix} 需在客户端 hosts 解析（点右侧复制）`
-      : (mdns.running
-        ? `mDNS 正在把 ${info.suffix} 解析到 ${mdns.ip || '局域网 IP'}`
-        : 'mDNS 不可用，请用「复制 hosts」在客户端手动映射');
+    $('#debug-hosts-tip').textContent = '所有应用均为 IP 直连：打不开时确认端口放行、容器处于 host 网络';
   } catch (err) {
     $('#debug-meta').textContent = `读取调试信息失败：${err.message}`;
-  }
-}
-
-async function runMdnsSelfTest() {
-  const box = $('#mdns-selftest-result');
-  const btn = $('#debug-mdns-test');
-  if (!box) return;
-  box.hidden = false;
-  box.textContent = '正在向本机 5353 端口发起查询…';
-  if (btn) btn.disabled = true;
-  try {
-    const data = await api('/api/mdns/selftest');
-    const items = (data.items || []).map((item) => (
-      `<div class="mdns-row ${item.ok ? 'ok' : 'bad'}">`
-      + `<code>${escapeHtml(item.name)}</code> → ${item.actual ? `<code>${escapeHtml(item.actual)}</code>` : '<em>无应答</em>'}`
-      + ` · 期望 <code>${escapeHtml(item.expect || '-')}</code> · 规则${item.matched ? '命中' : '未命中'}`
-      + '</div>'
-    )).join('');
-    box.innerHTML = `<div class="mdns-head">${data.ok ? '全部域名解析到指定 IP' : '存在解析异常的域名'} · 期望 IP <code>${escapeHtml(data.expect_ip || '-')}</code></div>${items}`;
-  } catch (err) {
-    box.textContent = `mDNS 自检失败：${err.message}`;
-  } finally {
-    if (btn) btn.disabled = false;
   }
 }
 
@@ -1451,15 +1333,4 @@ $('#debug-toggle').addEventListener('change', async (event) => {
     toast(err.message);
   }
 });
-$('#debug-copy-hosts').addEventListener('click', async () => {
-  const text = (debugInfo && debugInfo.hosts) || '';
-  if (!text) return;
-  try {
-    await copyText(text);
-    toast('hosts 片段已复制');
-  } catch (err) {
-    toast('复制失败，请手动选择日志面板中的地址');
-  }
-});
 
-$('#debug-mdns-test')?.addEventListener('click', runMdnsSelfTest);
