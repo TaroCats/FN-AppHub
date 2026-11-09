@@ -64,13 +64,13 @@
         },
         "1.0.16": {
           "os_min_version": "1.1.3100",
-          "updated_at": "2026-11-09T20:36:59+08:00",
+          "updated_at": "2026-11-09T20:37:45+08:00",
           "changelog": "- **内嵌浏览改用子域反向代理**：每个应用分配稳定子域 `app-<id>.fnos.local`，iframe 直接以该子域根路径访问，绝对路径资源、`fetch`/`WebSocket`、302 跳转、Cookie 全部按同源处理。\n  - 不再依赖 `/p/{id}/` 前缀改写，彻底解决应用发起「绝对根路径请求」时落到 AppHub 根导致的 404。\n  - 代理层剥离上游 `X-Frame-Options` / CSP `frame-ancestors`，注入运行时补丁把应用里写死的旧源重写为当前子域。\n  - 子域由内置 mDNS 响应器解析：多网卡逐个加入 `224.0.0.251` 组播组，逐个网卡回包，避免 Clash/Tailscale 类 tun 网卡抢占默认路由导致查询收不到。\n  - 解析 IP 优先取「访问地址」里保存的映射 IP，遇到回环地址自动回退到探测到的局域网 IP；mDNS 端口被占用或权限不足时只告警，不影响面板。\n- **新增调试面板**：面板顶部「调试」按钮打开右侧抽屉，可查看子域映射、mDNS 应答 IP 与命中次数、日志文件位置。\n  - 一键开关「调试模式」（服务端提升到 DEBUG 级），支持级别过滤、关键字过滤（如 `app-12`、`502`、`set-cookie`）、刷新与清空。\n  - 内置「复制 hosts」：mDNS 不可用的设备可直接拿到 `IP\\t域名\\t# 注释` 三行文本贴进系统 hosts。\n  - 新增 `GET /api/debug`、`GET /api/logs`、`GET /api/subdomains`、`POST/GET /api/hosts`；日志落盘 `data/logs/apphub.log` 并支持运行时按级别检索。\n- **内嵌容错**：打开内嵌时对子域做一次静默探活，解析/连接失败会在工具条下方提示「子域解析失败」，并给出「复制 hosts」按钮，不再只显示笼统的「加载较慢」。\n- **修复**：mDNS 解析查询名时 `idna` 编解码器不支持 `errors=\"ignore\"` 导致所有查询被静默丢弃的问题（此前表现为「端口已监听但查询无应答」）。",
           "packages": {
             "all": {
               "download_url": "https://github.com/TaroCats/FN-AppHub/releases/download/v1.0.16/apphub_1.0.16.fpk",
-              "sha256": "1ef5a18d458912b19830c2c08a1392e8a3460fa286fb72bf56fa3062fdf8f0d9",
-              "size": 106020
+              "sha256": "e21ebe3cb8d560dc74cdd230559418f864cef3e3b377fdf210786771f8fdd9aa",
+              "size": 106007
             }
           }
         }
