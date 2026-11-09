@@ -245,6 +245,13 @@
         </div>
         <small>这里只保存 fnos.local 指向哪个 IP，不改任何应用地址；统一配置的应用始终用 fnos.local:端口 访问。</small>
       </label>
+      <label class="field">
+        <span>客户端 hosts</span>
+        <small>子域路由已改由容器内 nginx 按 Host 完成，mDNS 默认关闭：请把下面这段写入客户端 hosts，app-xx.fnos.local 才能解析到 NAS。</small>
+        <div style="margin-top:8px">
+          <button type="button" class="btn ghost" id="host-copy-hosts">复制 hosts 片段</button>
+        </div>
+      </label>
       <p class="host-preview" id="host-preview">将把 fnos.local 映射到当前 IP</p>
       <div class="modal-foot">
         <button type="button" class="btn ghost" id="host-cancel">取消</button>

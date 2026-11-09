@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator, model_validator
 
-from . import db, logbuf
+from . import db, logbuf, webconf
 from . import mdns as mdns_mod
 from .docker_scan import probe as probe_url
 from .docker_scan import normalize_host
@@ -143,6 +143,7 @@ def _apply_base_host(host: str) -> str:
         if MDNS is not None:
             MDNS.announce()
             log.info("访问地址已更新为 %s，mDNS 应答 IP %s", host, alias_ip() or "未获取")
+    webconf.apply()
     return host
 
 
@@ -455,6 +456,11 @@ class GroupReorderPayload(BaseModel):
 
 # ---------------------------------------------------------------- 启动
 
+def _mdns_enabled() -> bool:
+    """mDNS 已不再是必需链路（nginx + hosts 足够），默认关闭，可显式开启。"""
+    return os.environ.get("APPHUB_MDNS", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     global MDNS
@@ -465,18 +471,25 @@ async def _startup() -> None:
     apply_debug(db.get_setting("debug", "") == "1")
     for item in db.list_apps():
         decorate(item)
-    try:
-        # 同时公布裸域名（fnos.local）与统一后缀：面板访问不再依赖 avahi 是否在跑
-        MDNS = await mdns_mod.start([WEB_SUFFIX, ALIAS_HOST], alias_ip)
+    # Host 映射由容器内 nginx 承担：应用增删改后自动重写 conf 并 reload
+    webconf.apply()
+    if _mdns_enabled():
+        try:
+            # 可选：仍公布裸域名与统一后缀，方便不做 hosts 的客户端
+            MDNS = await mdns_mod.start([WEB_SUFFIX, ALIAS_HOST], alias_ip)
+            log.info(
+                "mDNS 应答 %s / *.%s -> %s（来源：%s）",
+                ALIAS_HOST, WEB_SUFFIX, alias_ip() or "未获取到局域网 IP",
+                "访问地址映射 IP" if _as_ipv4(db.get_setting("base_host", "")) else "自动探测局域网 IP",
+            )
+            MDNS.announce()
+        except Exception as exc:  # mDNS 只是便捷解析，失败不影响主功能
+            log.warning("mDNS 未启动：%s", exc)
+    else:
         log.info(
-            "mDNS 应答 %s / *.%s -> %s（来源：%s）",
-            ALIAS_HOST, WEB_SUFFIX, alias_ip() or "未获取到局域网 IP",
-            "访问地址映射 IP" if _as_ipv4(db.get_setting("base_host", "")) else "自动探测局域网 IP",
+            "mDNS 已关闭：子域解析请用面板「复制 hosts」，路由由容器内 nginx 按 Host 完成（%s）",
+            webconf.CONF_PATH,
         )
-        # 启动即通告一次，客户端首次访问不必等广播查询
-        MDNS.announce()
-    except Exception as exc:  # mDNS 只是便捷解析，失败不影响主功能
-        log.warning("mDNS 未启动：%s", exc)
     asyncio.create_task(_first_run_import())
 
 
@@ -522,6 +535,8 @@ async def _first_run_import() -> None:
         if imported >= 24:
             break
     db.set_setting("auto_import", "done")
+    if imported:
+        webconf.apply()
     log.info("首次自动收录 %s 个应用", imported)
 
 
@@ -542,7 +557,9 @@ async def api_create_app(payload: AppPayload) -> dict[str, Any]:
     data = payload.model_dump()
     if data.get("slug") and db.slug_taken(data["slug"]):
         raise HTTPException(status_code=409, detail=f"子域已被占用：{data['slug']}")
-    return decorate(db.create_app(data))
+    row = decorate(db.create_app(data))
+    webconf.apply()
+    return row
 
 
 @app.put("/api/apps/{app_id}")
@@ -553,6 +570,7 @@ async def api_update_app(app_id: int, payload: AppPayload) -> dict[str, Any]:
     updated = db.update_app(app_id, data)
     if not updated:
         raise HTTPException(status_code=404, detail="应用不存在")
+    webconf.apply()
     return decorate(updated)
 
 
@@ -566,6 +584,7 @@ async def api_delete_app(app_id: int) -> dict[str, bool]:
             icon.unlink()
         except OSError:
             pass
+    webconf.apply()
     return {"ok": True}
 
 
@@ -767,6 +786,8 @@ async def api_import(payload: ImportPayload) -> dict[str, Any]:
             }
         )
         created += 1
+    if created:
+        webconf.apply()
     return {"created": created, "skipped": skipped}
 
 
@@ -892,6 +913,12 @@ async def api_debug_info() -> dict[str, Any]:
         "suffix": WEB_SUFFIX,
         "self_port": SELF_PORT,
         "mdns": mdns_snapshot(),
+        "nginx": {
+            "enabled": webconf.enabled(),
+            "conf": str(webconf.CONF_PATH),
+            "port": webconf.PUBLIC_PORT,
+            "internal_port": webconf.INTERNAL_PORT,
+        },
         "log_file": logbuf.log_file_path(db.DATA_DIR),
         "apps": [
             {

@@ -490,10 +490,17 @@ function openUrl(app) {
   return `${String(app.url || '').replace(/\/+$/, '')}${homePath(app)}`;
 }
 
-/* 子域地址：每个应用独占 app-xx.fnos.local:9080，根路径原样反代 */
+/* 内嵌地址：同源路径反代 /p/<id>/，不依赖任何 DNS 查询，
+   避免客户端 DNS 被代理/隧道接管时 .local 解析被拖慢数秒 */
 function frameUrlOf(app) {
   if (!app) return 'about:blank';
   if (app.frame_url) return app.frame_url;
+  return `/p/${app.id}${homePath(app) || '/'}`;
+}
+
+/* 子域地址：每个应用独占 app-xx.fnos.local:9080，根路径原样反代（需客户端能解析该子域） */
+function subdomainUrlOf(app) {
+  if (!app) return 'about:blank';
   const slug = app.slug || `app-${app.id}`;
   const port = state.selfPort && String(state.selfPort) !== '80' ? `:${state.selfPort}` : '';
   return `http://${slug}.${state.webSuffix || 'fnos.local'}${port}${homePath(app) || '/'}`;
@@ -626,6 +633,19 @@ function closeHostModal() {
 $('#btn-host').addEventListener('click', openHostModal);
 $('#host-close').addEventListener('click', closeHostModal);
 $('#host-cancel').addEventListener('click', closeHostModal);
+
+/* 子域解析全靠客户端 hosts（mDNS 已默认关闭），入口常显在映射 IP 弹窗里 */
+$('#host-copy-hosts').addEventListener('click', async () => {
+  try {
+    const resp = await fetch('/api/hosts', { cache: 'no-store' });
+    const text = await resp.text();
+    if (!text.trim()) return toast('hosts 片段为空：先在下方保存映射 IP');
+    await navigator.clipboard.writeText(text);
+    toast('hosts 片段已复制，粘到 /etc/hosts 即可');
+  } catch (err) {
+    toast(`复制失败：${err.message || err}`);
+  }
+});
 $('#host-mask').addEventListener('click', closeHostModal);
 $('#bulk-host').addEventListener('change', () => {
   const mode = $('#bulk-host').value;
@@ -1283,17 +1303,21 @@ async function refreshDebugMeta() {
     const rows = (info.apps || []).map((a) => (
       `<div><code>${escapeHtml(a.frame_url)}</code> → <code>${escapeHtml(a.upstream)}</code></div>`
     )).join('');
+    const ngx = info.nginx || {};
     $('#debug-meta').innerHTML = [
-      `域名 ${suffixes} · 端口 <code>${escapeHtml(info.self_port)}</code> · mDNS <code>${mdns.running ? '已启动' : '不可用'}</code>`,
+      `域名 ${suffixes} · 端口 <code>${escapeHtml(info.self_port)}</code> · nginx <code>${ngx.enabled ? '已接管' : '未启用'}</code> · mDNS <code>${mdns.running ? '已启动' : '已关闭'}</code>`,
+      ngx.enabled ? `Host 映射：nginx 对外 <code>${escapeHtml(String(ngx.port))}</code> → 面板 <code>127.0.0.1:${escapeHtml(String(ngx.internal_port))}</code>，子域按 Host 直连应用（不必再装 mDNS）` : '',
       `应答 IP <code>${escapeHtml(mdns.ip || '未获取')}</code>（${escapeHtml(mdns.source || '未知来源')}）· 裸域名 <code>${mdns.apex ? '已接管' : '未接管'}</code> · 命中 <code>${mdns.hits || 0}</code> 次`,
       `日志文件 <code>${escapeHtml(info.log_file)}</code>`,
       rows,
     ].filter(Boolean).join('<br>');
     $('#debug-summary').textContent = `调试模式：${info.enabled ? '开启' : '关闭'} · ${(info.apps || []).length} 个子域`;
     $('#debug-toggle').checked = !!info.enabled;
-    $('#debug-hosts-tip').textContent = mdns.running
-      ? `mDNS 正在把 ${info.suffix} 解析到 ${mdns.ip || '局域网 IP'}`
-      : 'mDNS 不可用，请用「复制 hosts」在客户端手动映射';
+    $('#debug-hosts-tip').textContent = ngx.enabled
+      ? `子域路由由 nginx 承担，${info.suffix} 与 app-*.${info.suffix} 需在客户端 hosts 解析（点右侧复制）`
+      : (mdns.running
+        ? `mDNS 正在把 ${info.suffix} 解析到 ${mdns.ip || '局域网 IP'}`
+        : 'mDNS 不可用，请用「复制 hosts」在客户端手动映射');
   } catch (err) {
     $('#debug-meta').textContent = `读取调试信息失败：${err.message}`;
   }

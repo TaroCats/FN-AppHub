@@ -1,5 +1,5 @@
 appname               = apphub
-version               = 1.0.20
+version               = 1.0.21
 display_name          = 应用聚合中心
 desc                  = <p>把本机 Docker 应用聚合成一个入口：自动扫描容器暴露的端口，一键收录，并支持在应用内直接内嵌浏览（无需切换标签页）。</p><p><b>核心能力：</b>Docker 端口扫描与批量导入、手动新增/编辑访问列表、分组与搜索、子域反向代理内嵌浏览（app-xx.fnos.local，内置 mDNS）、图标自动抓取、内置调试面板与运行日志。</p><p><b>技术栈：</b>FastAPI + SQLite + 原生前端</p>
 platform              = x86
