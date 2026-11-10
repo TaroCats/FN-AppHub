@@ -7,11 +7,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app/backend
 
-# nginx 只托管面板端口，应用由浏览器 IP 直连；curl 供健康检查使用
+# 直接用 uvicorn 对外提供服务（不再安装 nginx）；curl 供健康检查使用
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates nginx \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -f /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
@@ -24,9 +23,7 @@ RUN chmod +x ./start.sh
 
 ENV APPHUB_STATIC=/app/static \
     APPHUB_DATA=/app/data \
-    APPHUB_PORT=9080 \
-    APPHUB_INTERNAL_PORT=19080 \
-    APPHUB_NGINX=1
+    APPHUB_PORT=9080
 
 EXPOSE 9080
 

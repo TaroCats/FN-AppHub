@@ -12,8 +12,6 @@ const state = {
   baseHost: '',
   hostSynced: false,
   selfPort: '',
-  debug: false,
-  logTimer: null,
 };
 
 
@@ -104,8 +102,15 @@ function addrLabel(app) {
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0', '::1', '[::1]']);
 const HOST_KEY = 'apphub.host';
 /* 统一配置应用直接用局域网 IP 访问：不再有域名、hosts、mDNS 与反代 */
+const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+function isIpv4(host) {
+  return IPV4_RE.test(String(host || '').trim());
+}
+
+/* 统一配置里只认 IPv4；没配置或存了域名时，退回当前访问 fnOS 的 host */
 function accessHost() {
-  return state.baseHost || currentHost();
+  const saved = String(state.baseHost || '').trim();
+  return isIpv4(saved) ? saved : currentHost();
 }
 
 function urlHostname(url) {
@@ -423,9 +428,9 @@ function currentHost() {
 function unifiedHost() {
   const mode = localStorage.getItem(HOST_KEY) || 'auto';
   if (mode === 'custom') {
-    return (localStorage.getItem(`${HOST_KEY}.custom`) || '').trim() || state.baseHost || currentHost();
+    return (localStorage.getItem(`${HOST_KEY}.custom`) || '').trim() || accessHost();
   }
-  if (mode === 'auto') return state.baseHost || currentHost();
+  if (mode === 'auto') return accessHost();
   return mode;
 }
 
@@ -461,7 +466,11 @@ function homePath(app) {
 /* 应用实际打开地址：基础地址 + 主页路径 */
 function openUrl(app) {
   if (!app) return '';
-  return `${String(app.url || '').replace(/\/+$/, '')}${homePath(app)}`;
+  const base = `${String(app.url || '').replace(/\/+$/, '')}${homePath(app)}`;
+  /* 内嵌/新窗口默认走「IP + 端口」：IP 取统一配置（访问地址）里的值，
+     默认即当前访问 fnOS 的 host；自定义地址的应用保持用户填写的原地址 */
+  if ((app.url_mode || 'auto') !== 'auto') return base;
+  return withHost(base, accessHost());
 }
 
 /* 内嵌地址与服务端返回的 frame_url 完全一致：就是应用的 IP 直连地址 */
@@ -570,7 +579,7 @@ function refreshBulkPreview() {
 function openHostModal() {
   const sel = $('#bulk-host');
   const custom = $('#bulk-host-custom');
-  const mapped = state.baseHost || currentHost();
+  const mapped = accessHost();
   sel.options[0].textContent = `当前访问地址（${currentHost()}）`;
   sel.options[1].textContent = '127.0.0.1（仅本机）';
   const saved = localStorage.getItem(HOST_KEY) || 'auto';
@@ -1023,7 +1032,7 @@ function openModal(app) {
   $('#modal-title').textContent = app ? '编辑应用' : '新增应用';
   const form = $('#form');
   form.reset();
-  form.name.value = app ? app.name : '';
+  form.elements.name.value = app ? app.name : '';
   const parsed = parseAddr(app ? app.url : '');
   const mode = app ? (app.url_mode || 'auto') : 'auto';
   $('#form-url-mode').value = mode;
@@ -1033,15 +1042,14 @@ function openModal(app) {
   $('#form-url').placeholder = `http://${accessHost()}:端口`;
   $('#form-home-path').value = app ? (app.home_path || '') : '';
   setUrlMode(mode);
-  form.group_name.value = app ? app.group_name : '';
-  form.open_mode.value = app ? (app.open_mode || 'inline') : 'inline';
-  form.mode.value = 'direct';
-  form.note.value = app ? app.note || '' : '';
+  form.elements.group_name.value = app ? app.group_name : '';
+  form.elements.open_mode.value = app ? (app.open_mode || 'inline') : 'inline';
+  form.elements.note.value = app ? app.note || '' : '';
   $('#form-group').value = app && app.group_name && app.group_name !== '未分组' ? app.group_name : '';
   closeGroupPanel();
   $('#modal-mask').hidden = false;
   $('#modal').hidden = false;
-  setTimeout(() => form.name.focus(), 40);
+  setTimeout(() => form.elements.name.focus(), 40);
 }
 
 function closeModal() {
@@ -1087,15 +1095,15 @@ $('#form').addEventListener('submit', async (event) => {
     home_path = '';
   }
   const payload = {
-    name: form.name.value.trim(),
+    name: form.elements.name.value.trim(),
     url,
     url_mode: urlMode,
     port: urlMode === 'auto' ? String(Number(port)) : '',
     home_path,
-    group_name: form.group_name.value.trim() || '未分组',
-    open_mode: form.open_mode.value,
-    mode: form.mode.value,
-    note: form.note.value.trim(),
+    group_name: form.elements.group_name.value.trim() || '未分组',
+    open_mode: form.elements.open_mode.value,
+    mode: 'direct',
+    note: form.elements.note.value.trim(),
   };
   const submit = $('#modal-submit');
   submit.disabled = true;
@@ -1119,14 +1127,14 @@ $('#form').addEventListener('submit', async (event) => {
 /* ---------------- 加载与探测 ---------------- */
 async function reportHost() {
   const host = currentHost();
-  // 本机回环地址不作为默认值，避免把已记录的局域网地址覆盖掉
-  if (!host || host === '127.0.0.1' || host === 'localhost') return;
+  // 只上报 IPv4：域名访问、本机回环地址都不写入，避免把应用地址带回域名
+  if (!isIpv4(host) || LOOPBACK_HOSTS.has(host.toLowerCase())) return;
   try {
-    // 主面板已统一配置过主机时尊重面板选择，不被当前访问地址覆盖
+    // 主面板已统一配置过 IP 时尊重面板选择，不被当前访问地址覆盖
     const setting = await api('/api/settings/base-host');
-    const recorded = String(setting.host || '').toLowerCase();
-    if (recorded && !LOOPBACK_HOSTS.has(recorded)) {
-      state.baseHost = setting.host;
+    const recorded = String(setting.host || '').trim();
+    if (isIpv4(recorded) && !LOOPBACK_HOSTS.has(recorded.toLowerCase())) {
+      state.baseHost = recorded;
       return;
     }
     await api('/api/settings/base-host', {
@@ -1207,7 +1215,6 @@ document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (!viewer.hidden) return closeViewer();
   if (!$('#modal').hidden) return closeModal();
-  if (debugDrawer && !debugDrawer.hidden) return closeDebug();
   if (!$('#scan-drawer').hidden) return closeScan();
 });
 
@@ -1217,120 +1224,3 @@ initHostPicker();
 reportHost();
 load();
 setInterval(probeAll, 60000);
-
-/* ---------------- 调试 / 日志 ---------------- */
-const debugDrawer = $('#debug-drawer');
-const debugMask = $('#debug-mask');
-let debugInfo = null;
-let debugLastSeq = 0;
-
-function openDebug() {
-  debugDrawer.hidden = false;
-  debugMask.hidden = false;
-  debugLastSeq = 0;
-  refreshDebugMeta();
-  refreshLogs(true);
-  clearInterval(state.logTimer);
-  state.logTimer = setInterval(() => {
-    if (!debugDrawer.hidden) refreshLogs(false);
-  }, 2500);
-}
-
-function closeDebug() {
-  debugDrawer.hidden = true;
-  debugMask.hidden = true;
-  clearInterval(state.logTimer);
-  state.logTimer = null;
-}
-
-async function refreshDebugMeta() {
-  try {
-    const info = await api('/api/debug');
-    debugInfo = info;
-    const rows = (info.apps || []).map((a) => (
-      `<div><code>${escapeHtml(a.frame_url)}</code> → <code>${escapeHtml(a.upstream)}</code></div>`
-    )).join('');
-    const ngx = info.nginx || {};
-    $('#debug-meta').innerHTML = [
-      `访问 IP <code>${escapeHtml(info.access_ip || '未获取')}</code> · 面板端口 <code>${escapeHtml(String(info.self_port))}</code> · nginx <code>${ngx.enabled ? '已接管面板' : '未启用，面板由 uvicorn 直连'}</code>`,
-      ngx.enabled ? `面板走 <code>${escapeHtml(String(ngx.port))}</code>，应用一律 IP:端口 直连，不经反代` : '',
-      `日志文件 <code>${escapeHtml(info.log_file)}</code>`,
-      rows,
-    ].filter(Boolean).join('<br>');
-    $('#debug-summary').textContent = `调试模式：${info.enabled ? '开启' : '关闭'} · ${(info.apps || []).length} 个应用`;
-    $('#debug-toggle').checked = !!info.enabled;
-    $('#debug-hosts-tip').textContent = '所有应用均为 IP 直连：打不开时确认端口放行、容器处于 host 网络';
-  } catch (err) {
-    $('#debug-meta').textContent = `读取调试信息失败：${err.message}`;
-  }
-}
-
-async function refreshLogs(reset) {
-  const params = new URLSearchParams({ limit: '300' });
-  const level = $('#debug-level').value;
-  const keyword = $('#debug-q').value.trim();
-  if (level) params.set('level', level);
-  if (keyword) params.set('q', keyword);
-  if (!reset && debugLastSeq) params.set('since', String(debugLastSeq));
-  try {
-    const data = await api(`/api/logs?${params.toString()}`);
-    const list = $('#log-list');
-    if (reset) {
-      list.innerHTML = '';
-      debugLastSeq = 0;
-    }
-    const items = data.items || [];
-    if (!items.length && reset) {
-      list.innerHTML = '<div class="log-empty">暂无日志</div>';
-      return;
-    }
-    const empty = list.querySelector('.log-empty');
-    if (empty) empty.remove();
-    const html = items.map((item) => {
-      debugLastSeq = Math.max(debugLastSeq, item.seq);
-      return `<div class="log-row"><span class="t">${escapeHtml(item.time)}</span>`
-        + `<span class="lv ${escapeHtml(item.level)}">${escapeHtml(item.level)}</span>`
-        + `<span class="m">${escapeHtml(item.msg)}</span></div>`;
-    }).join('');
-    list.insertAdjacentHTML('beforeend', html);
-    while (list.childElementCount > 600) list.removeChild(list.firstElementChild);
-    list.scrollTop = list.scrollHeight;
-  } catch (err) {
-    $('#log-list').innerHTML = `<div class="log-empty">${escapeHtml(err.message)}</div>`;
-  }
-}
-
-$('#btn-debug').addEventListener('click', openDebug);
-$('#debug-close').addEventListener('click', closeDebug);
-$('#debug-mask').addEventListener('click', closeDebug);
-$('#debug-refresh').addEventListener('click', () => { refreshDebugMeta(); refreshLogs(true); });
-$('#debug-level').addEventListener('change', () => refreshLogs(true));
-$('#debug-q').addEventListener('input', () => {
-  clearTimeout(refreshLogs._t);
-  refreshLogs._t = setTimeout(() => refreshLogs(true), 350);
-});
-$('#debug-clear').addEventListener('click', async () => {
-  try {
-    await api('/api/logs', { method: 'DELETE' });
-    refreshLogs(true);
-    toast('日志已清空');
-  } catch (err) {
-    toast(err.message);
-  }
-});
-$('#debug-toggle').addEventListener('change', async (event) => {
-  try {
-    const res = await api('/api/debug', {
-      method: 'POST',
-      body: JSON.stringify({ enabled: event.target.checked }),
-    });
-    toast(`调试模式已${res.enabled ? '开启（输出 DEBUG 日志）' : '关闭'}`);
-    state.debug = !!res.enabled;
-    refreshDebugMeta();
-    refreshLogs(true);
-  } catch (err) {
-    event.target.checked = !event.target.checked;
-    toast(err.message);
-  }
-});
-
