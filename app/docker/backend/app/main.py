@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator, model_validator
 
-from . import db, logbuf, webconf
+from . import db, logbuf
 from .netinfo import local_ipv4_addrs
 from .docker_scan import probe as probe_url
 from .docker_scan import normalize_host
@@ -118,14 +118,20 @@ def _migrate_auto_urls() -> list[dict[str, Any]]:
 
 
 def _apply_base_host(host: str) -> str:
-    """保存「访问地址」里的局域网 IP，并把统一配置模式的应用地址改成该 IP。"""
-    host = normalize_host(host or "")
-    if host:
-        db.set_setting("base_host", host)
-        _migrate_auto_urls()
-        log.info("访问地址已更新为 %s，统一配置应用地址已按该 IP 重写", host)
-    webconf.apply()
-    return host
+    """保存「访问地址」里的局域网 IP，并把统一配置模式的应用地址改成该 IP。
+
+    只接受 IPv4：域名/主机名（历史遗留）一律不写入，避免把应用地址带回域名。
+    """
+    raw = normalize_host(host or "")
+    ip = _as_ipv4(raw)
+    if not ip:
+        if raw:
+            log.info("忽略非 IPv4 的访问地址：%s", raw)
+        return ""
+    db.set_setting("base_host", ip)
+    _migrate_auto_urls()
+    log.info("访问地址已更新为 %s，统一配置应用地址已按该 IP 重写", ip)
+    return ip
 
 
 # ---------------------------------------------------------------- 应用字段辅助
@@ -372,7 +378,6 @@ async def _startup() -> None:
     apply_debug(db.get_setting("debug", "") == "1")
     for item in db.list_apps():
         decorate(item)
-    webconf.apply()
     log.info(
         "AppHub 以 IP 直连模式运行：应用地址为 http://<局域网IP>:端口（当前 IP %s），不使用域名与反代",
         access_ip() or "未获取到局域网 IP",
@@ -423,8 +428,7 @@ async def _first_run_import() -> None:
             break
     db.set_setting("auto_import", "done")
     if imported:
-        webconf.apply()
-    log.info("首次自动收录 %s 个应用", imported)
+        log.info("首次自动收录 %s 个应用", imported)
 
 
 # ---------------------------------------------------------------- 应用列表
@@ -445,7 +449,6 @@ async def api_create_app(payload: AppPayload) -> dict[str, Any]:
     if data.get("slug") and db.slug_taken(data["slug"]):
         raise HTTPException(status_code=409, detail=f"标签已被占用：{data['slug']}")
     row = decorate(db.create_app(data))
-    webconf.apply()
     return row
 
 
@@ -457,7 +460,6 @@ async def api_update_app(app_id: int, payload: AppPayload) -> dict[str, Any]:
     updated = db.update_app(app_id, data)
     if not updated:
         raise HTTPException(status_code=404, detail="应用不存在")
-    webconf.apply()
     return decorate(updated)
 
 
@@ -471,7 +473,6 @@ async def api_delete_app(app_id: int) -> dict[str, bool]:
             icon.unlink()
         except OSError:
             pass
-    webconf.apply()
     return {"ok": True}
 
 
@@ -609,7 +610,8 @@ async def api_set_base_host(payload: HostSetting) -> dict[str, Any]:
 
 @app.get("/api/settings/base-host")
 async def api_get_base_host(request: Request) -> dict[str, Any]:
-    host = normalize_host(db.get_setting("base_host", "")) or _request_host(request)
+    saved = _as_ipv4(normalize_host(db.get_setting("base_host", "")))
+    host = saved or _as_ipv4(_request_host(request)) or access_ip() or ""
     return {"host": host}
 
 
@@ -622,9 +624,9 @@ async def api_scan(
 ) -> dict[str, Any]:
     # 优先级：本次指定 > 已记录的默认主机 > 当前请求 Host > 127.0.0.1
     base_host = (
-        normalize_host(host)
-        or normalize_host(db.get_setting("base_host", ""))
-        or _request_host(request)
+        _as_ipv4(normalize_host(host))
+        or _as_ipv4(normalize_host(db.get_setting("base_host", "")))
+        or _as_ipv4(_request_host(request))
         or "127.0.0.1"
     )
     try:
@@ -671,8 +673,6 @@ async def api_import(payload: ImportPayload) -> dict[str, Any]:
             }
         )
         created += 1
-    if created:
-        webconf.apply()
     return {"created": created, "skipped": skipped}
 
 
@@ -755,46 +755,6 @@ async def api_app_icon(app_id: int, refresh: bool = False) -> Response:
 @app.get("/api/health")
 async def api_health() -> dict[str, Any]:
     return {"ok": True, "apps": len(db.list_apps()), "port": SELF_PORT}
-
-
-# ---------------------------------------------------------------- 调试
-
-class DebugPayload(BaseModel):
-    enabled: bool = True
-
-
-@app.get("/api/debug")
-async def api_debug_info() -> dict[str, Any]:
-    apps = decorate_all(db.list_apps())
-    return {
-        "enabled": DEBUG,
-        "self_port": SELF_PORT,
-        "access_ip": access_ip(),
-        "nginx": {
-            "enabled": webconf.enabled(),
-            "conf": str(webconf.CONF_PATH),
-            "port": webconf.PUBLIC_PORT,
-            "internal_port": webconf.INTERNAL_PORT,
-        },
-        "log_file": logbuf.log_file_path(db.DATA_DIR),
-        "apps": [
-            {
-                "id": item["id"],
-                "name": item["name"],
-                "slug": item["slug"],
-                "frame_url": item["frame_url"],
-                "upstream": item["url"],
-                "mode": "direct",
-            }
-            for item in apps
-        ],
-    }
-
-
-@app.post("/api/debug")
-async def api_set_debug(payload: DebugPayload) -> dict[str, Any]:
-    apply_debug(payload.enabled)
-    return {"enabled": DEBUG}
 
 
 @app.get("/api/logs")
