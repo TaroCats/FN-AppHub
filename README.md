@@ -2,8 +2,8 @@
 
 把本机所有 Docker 应用的 Web 入口聚合成一个页面，自动扫描容器暴露端口，支持在应用内直接内嵌浏览。
 
-- 当前版本：1.0.25
-- 安装包：`apphub_1.0.25.fpk`（飞牛应用中心 / FnDepot 均可安装）
+- 当前版本：1.0.26
+- 安装包：`apphub_1.0.26.fpk`（飞牛应用中心 / FnDepot 均可安装）
 - 端口：9080（host 网络）
 - 数据目录：`/var/apps/apphub/shares/apphub/data`（SQLite 数据库 `apphub.db`）
 
@@ -91,6 +91,13 @@ python3 scripts/gen_fnpack.py --version 1.0.13 \
 ```
 
 > `fnpack.json` 中的 `sha256` 必须与 Release 上的 fpk 完全一致，否则 FnDepot 会校验失败并跳过该版本。请始终让工作流生成，不要手工编造哈希。
+
+## 1.0.26 变更
+- **修复升级时旧容器清理不掉**：`upgrade_init` 里直接 `docker rm` 一个仍在运行的容器会失败——`container is running: stop the container before removing or force remove`，于是旧容器继续占着 9080 和应用名，随后 `docker compose` 创建新容器时报 `Conflict. The container name "/apphub" is already in use` 或端口被占用，升级卡在半路。现在改为「`docker stop -t 20` → 轮询确认真正退出（最长 30 秒）→ 仍未退出则 `docker kill` → `docker rm`，最后兜底 `rm -f`」，先停后删，升级过程不再依赖运行状态。
+- **补全残留清理**：除按容器名清理外，再按 compose 项目标签（`com.docker.compose.project`）与同名镜像兜底清理，容器被改过名、存在多副本或历史残留时也能一并清掉。
+- **等待端口释放**：删除完成后轮询 9080 是否真正空闲（最多 15 秒），避免新容器启动瞬间抢不到端口。
+- **`install_init` 同一问题一并修复**：安装前的残留清理走同一套 stop → 等待 → rm 逻辑。
+- **`uninstall_init` 不再空转**：原先直接 `exit 0`，卸载后容器仍留在系统里继续占用端口，现在卸载时先停后删。
 
 ## 1.0.25 变更
 - **版本号可见**：新增 `GET /api/version`，版本号由 CI 写入镜像内 `VERSION` 文件，前端启动时读取——浏览器 / fnOS 应用窗口的标题会显示 `AppHub v1.0.25 · 应用聚合中心`，页面左上角品牌旁也会出现同款版本徽标，一眼就能确认装的是哪一版。
