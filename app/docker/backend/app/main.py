@@ -104,6 +104,56 @@ def _to_ip_url(url: str, port: str = "") -> str:
     target = f"{host}:{real_port}" if real_port else host
     return f"{scheme}://{target}"
 
+def _target_of(url: str, port: str = "", home_path: str = "") -> tuple[str, str, str]:
+    """应用唯一目标：主机 + 端口 + 主页地址，用于重复判定。
+
+    主页地址为空或只有 / 时一律视为 /；url 自带路径（自定义模式）也会算进主页地址，
+    避免 http://1.2.3.4:8080/admin 与 home_path=/admin 被判成两个不同应用。
+    """
+    raw = (url or "").strip()
+    host = ""
+    url_path = ""
+    real_port = str(port or "").strip()
+    if raw:
+        parsed = urlparse(raw if "://" in raw else "http://" + raw)
+        host = (parsed.hostname or "").strip().lower()
+        url_path = parsed.path or ""
+        if not real_port:
+            try:
+                explicit = parsed.port
+            except ValueError:
+                explicit = None
+            if explicit:
+                real_port = str(explicit)
+            else:
+                real_port = "443" if parsed.scheme.lower() == "https" else "80"
+    if not real_port:
+        real_port = "80"
+    path = (home_path or "").strip() or url_path
+    path = re.sub(r"^https?://[^/]+", "", path, flags=re.I)
+    if not path or path == "/":
+        path = "/"
+    elif not path.startswith("/"):
+        path = "/" + path
+    path = path.rstrip("/") or "/"
+    return host, real_port, path
+
+
+def _find_duplicate(
+    url: str, port: str = "", home_path: str = "", exclude_id: Optional[int] = None
+) -> Optional[dict[str, Any]]:
+    """主机、端口、主页地址三者都相同才算重复。"""
+    target = _target_of(url, port, home_path)
+    if not target[0]:
+        return None
+    for item in db.list_apps():
+        if exclude_id is not None and item["id"] == exclude_id:
+            continue
+        if _target_of(item.get("url"), item.get("port"), item.get("home_path")) == target:
+            return item
+    return None
+
+
 def _migrate_auto_urls() -> list[dict[str, Any]]:
     """把统一配置模式的应用地址重写为当前局域网 IP:端口（换 IP 后自动收敛）。"""
     changed: list[dict[str, Any]] = []
@@ -442,9 +492,12 @@ async def api_list_apps() -> dict[str, Any]:
 
 @app.post("/api/apps")
 async def api_create_app(payload: AppPayload) -> dict[str, Any]:
-    existing = db.find_by_url(payload.url)
+    existing = _find_duplicate(payload.url, payload.port, payload.home_path)
     if existing:
-        raise HTTPException(status_code=409, detail=f"该地址已存在：{existing['name']}")
+        raise HTTPException(
+            status_code=409,
+            detail=f"该地址已存在：{existing['name']}（同 IP、端口与主页地址）",
+        )
     data = payload.model_dump()
     if data.get("slug") and db.slug_taken(data["slug"]):
         raise HTTPException(status_code=409, detail=f"标签已被占用：{data['slug']}")
@@ -455,6 +508,16 @@ async def api_create_app(payload: AppPayload) -> dict[str, Any]:
 @app.put("/api/apps/{app_id}")
 async def api_update_app(app_id: int, payload: AppPayload) -> dict[str, Any]:
     data = payload.model_dump(exclude_unset=True)
+    if not db.get_app(app_id):
+        raise HTTPException(status_code=404, detail="应用不存在")
+    existing = _find_duplicate(
+        payload.url, payload.port, payload.home_path, exclude_id=app_id
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该地址已存在：{existing['name']}（同 IP、端口与主页地址）",
+        )
     if data.get("slug") and db.slug_taken(data["slug"], exclude_id=app_id):
         raise HTTPException(status_code=409, detail=f"标签已被占用：{data['slug']}")
     updated = db.update_app(app_id, data)
