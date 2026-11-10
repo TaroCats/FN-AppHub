@@ -37,6 +37,28 @@ SELF_PORT = os.environ.get("APPHUB_PORT", "9080")
 # 不依赖 hosts、mDNS、子域路由，也不用 /p/ 同源代理。
 DEFAULT_LOCAL_IP = "127.0.0.1"
 
+APP_NAME = "AppHub"
+
+
+def app_version() -> str:
+    """当前版本号：优先环境变量，其次镜像内的 VERSION 文件（由 CI 写入）。"""
+    env = (os.environ.get("APPHUB_VERSION") or "").strip()
+    if env:
+        return env
+    for candidate in (
+        BASE_DIR / "VERSION",          # 镜像内：/app/backend/VERSION
+        BASE_DIR.parent / "VERSION",   # 源码树：app/docker/VERSION
+        Path("/app/backend/VERSION"),
+    ):
+        try:
+            text = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text
+    return "unknown"
+
+
 logbuf.setup(db.DATA_DIR, os.environ.get("APPHUB_LOG_LEVEL", "INFO"))
 log = logging.getLogger("apphub")
 
@@ -104,7 +126,9 @@ def _to_ip_url(url: str, port: str = "") -> str:
     target = f"{host}:{real_port}" if real_port else host
     return f"{scheme}://{target}"
 
-def _target_of(url: str, port: str = "", home_path: str = "") -> tuple[str, str, str]:
+def _target_of(
+    url: str, port: str = "", home_path: str = "", host_override: str = ""
+) -> tuple[str, str, str]:
     """应用唯一目标：主机 + 端口 + 主页地址，用于重复判定。
 
     主页地址为空或只有 / 时一律视为 /；url 自带路径（自定义模式）也会算进主页地址，
@@ -136,20 +160,37 @@ def _target_of(url: str, port: str = "", home_path: str = "") -> tuple[str, str,
     elif not path.startswith("/"):
         path = "/" + path
     path = path.rstrip("/") or "/"
-    return host, real_port, path
+    return (host_override or host), real_port, path
 
 
 def _find_duplicate(
-    url: str, port: str = "", home_path: str = "", exclude_id: Optional[int] = None
+    url: str,
+    port: str = "",
+    home_path: str = "",
+    exclude_id: Optional[int] = None,
+    url_mode: str = "",
 ) -> Optional[dict[str, Any]]:
-    """主机、端口、主页地址三者都相同才算重复。"""
-    target = _target_of(url, port, home_path)
+    """主机、端口、主页地址三者都相同才算重复。
+
+    统一配置（auto）模式的主机最终都会被「访问地址」拉齐成同一个 IP，所以这类应用
+    比较时直接用统一 IP，避免同一台机器从 LAN / Tailscale 两个 IP 访问时，
+    同一入口被当成两个应用重复收录。
+    """
+    base = _as_ipv4(normalize_host(db.get_setting("base_host", ""))) or ""
+
+    def key(u: str, p: str, hp: str, mode: str) -> tuple[str, str, str]:
+        override = base if (mode or "auto") == "auto" else ""
+        return _target_of(u, p, hp, host_override=override)
+
+    target = key(url, str(port or ""), home_path, url_mode)
     if not target[0]:
         return None
     for item in db.list_apps():
         if exclude_id is not None and item["id"] == exclude_id:
             continue
-        if _target_of(item.get("url"), item.get("port"), item.get("home_path")) == target:
+        if key(
+            item.get("url"), item.get("port"), item.get("home_path"), item.get("url_mode")
+        ) == target:
             return item
     return None
 
@@ -492,11 +533,13 @@ async def api_list_apps() -> dict[str, Any]:
 
 @app.post("/api/apps")
 async def api_create_app(payload: AppPayload) -> dict[str, Any]:
-    existing = _find_duplicate(payload.url, payload.port, payload.home_path)
+    existing = _find_duplicate(
+        payload.url, payload.port, payload.home_path, url_mode=payload.url_mode
+    )
     if existing:
         raise HTTPException(
             status_code=409,
-            detail=f"该地址已存在：{existing['name']}（同 IP、端口与主页地址）",
+            detail=f"该地址已存在：{existing['name']}（{open_url(existing)}）",
         )
     data = payload.model_dump()
     if data.get("slug") and db.slug_taken(data["slug"]):
@@ -511,12 +554,16 @@ async def api_update_app(app_id: int, payload: AppPayload) -> dict[str, Any]:
     if not db.get_app(app_id):
         raise HTTPException(status_code=404, detail="应用不存在")
     existing = _find_duplicate(
-        payload.url, payload.port, payload.home_path, exclude_id=app_id
+        payload.url,
+        payload.port,
+        payload.home_path,
+        exclude_id=app_id,
+        url_mode=payload.url_mode,
     )
     if existing:
         raise HTTPException(
             status_code=409,
-            detail=f"该地址已存在：{existing['name']}（同 IP、端口与主页地址）",
+            detail=f"该地址已存在：{existing['name']}（{open_url(existing)}）",
         )
     if data.get("slug") and db.slug_taken(data["slug"], exclude_id=app_id):
         raise HTTPException(status_code=409, detail=f"标签已被占用：{data['slug']}")
@@ -813,6 +860,11 @@ async def api_app_icon(app_id: int, refresh: bool = False) -> Response:
     elif data[:3] == b"\xff\xd8\xff":
         media = "image/jpeg"
     return Response(content=data, media_type=media, headers={"Cache-Control": "max-age=3600"})
+
+
+@app.get("/api/version")
+async def api_version() -> dict[str, Any]:
+    return {"name": APP_NAME, "version": app_version()}
 
 
 @app.get("/api/health")

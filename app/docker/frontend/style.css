@@ -659,3 +659,16 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .log-row .lv.ERROR, .log-row .lv.CRITICAL { color: var(--danger); }
 .log-row .m { color: var(--text-2); }
 .log-empty { padding: 40px 10px; text-align: center; color: var(--text-3); font-size: 12.5px; }
+
+.brand-version {
+  margin-left: 8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2, rgba(127, 127, 127, .12));
+  color: var(--text-3);
+  font-size: 11px;
+  font-style: normal;
+  letter-spacing: .2px;
+  vertical-align: middle;
+}

@@ -1147,6 +1147,23 @@ async function reportHost() {
   }
 }
 
+async function loadVersion() {
+  try {
+    const info = await api('/api/version');
+    const version = String((info && info.version) || '').trim();
+    if (!version || version === 'unknown') return;
+    const tag = `v${version}`;
+    document.title = `AppHub ${tag} · 应用聚合中心`;
+    const badge = $('#brand-version');
+    if (badge) {
+      badge.textContent = tag;
+      badge.title = `当前版本 ${tag}`;
+      badge.hidden = false;
+    }
+    state.version = version;
+  } catch (e) { /* 版本读取失败不影响使用 */ }
+}
+
 async function load() {
   try {
     const data = await api('/api/apps');
@@ -1221,6 +1238,7 @@ document.addEventListener('keydown', (event) => {
 $('#btn-add').addEventListener('keydown', (e) => e.stopPropagation());
 
 initHostPicker();
+loadVersion();
 reportHost();
 load();
 setInterval(probeAll, 60000);
