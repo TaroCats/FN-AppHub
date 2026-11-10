@@ -168,6 +168,18 @@
               "size": 96188
             }
           }
+        },
+        "1.0.26": {
+          "os_min_version": "1.1.3100",
+          "updated_at": "2026-11-10T10:46:04+08:00",
+          "changelog": "- **修复升级时旧容器清理不掉**：`upgrade_init` 里直接 `docker rm` 一个仍在运行的容器会失败——`container is running: stop the container before removing or force remove`，于是旧容器继续占着 9080 和应用名，随后 `docker compose` 创建新容器时报 `Conflict. The container name \"/apphub\" is already in use` 或端口被占用，升级卡在半路。现在改为「`docker stop -t 20` → 轮询确认真正退出（最长 30 秒）→ 仍未退出则 `docker kill` → `docker rm`，最后兜底 `rm -f`」，先停后删，升级过程不再依赖运行状态。\n- **补全残留清理**：除按容器名清理外，再按 compose 项目标签（`com.docker.compose.project`）与同名镜像兜底清理，容器被改过名、存在多副本或历史残留时也能一并清掉。\n- **等待端口释放**：删除完成后轮询 9080 是否真正空闲（最多 15 秒），避免新容器启动瞬间抢不到端口。\n- **`install_init` 同一问题一并修复**：安装前的残留清理走同一套 stop → 等待 → rm 逻辑。\n- **`uninstall_init` 不再空转**：原先直接 `exit 0`，卸载后容器仍留在系统里继续占用端口，现在卸载时先停后删。",
+          "packages": {
+            "all": {
+              "download_url": "https://github.com/TaroCats/FN-AppHub/releases/download/v1.0.26/apphub_1.0.26.fpk",
+              "sha256": "88c1b28a89cb5a4c90bf76cdea8573d345032723d3e9f7622b9ba064afb4adf1",
+              "size": 97492
+            }
+          }
         }
       }
     }
