@@ -48,7 +48,6 @@ https://raw.githubusercontent.com/TaroCats/FN-AppHub/main/fnpack.json
 | 应用内浏览 | 每个条目可在 AppHub 窗口内浏览，也可新标签页打开；内嵌一律使用应用自己的 IP:端口，不经过任何代理 |
 | 多窗口浏览 | 同时打开多个应用，顶部标签切换；默认全屏，可切分屏（全部平铺）与缩小（可拖动、可缩放的浮动窗） |
 | IP 直连 | 应用地址统一保存为 `http://<局域网IP>:端口`，浏览器直接访问：不用域名、不用 hosts、不经过反向代理 |
-| 调试面板 | 右侧抽屉查看访问 IP、端口占用、运行日志；可分级/关键字过滤、一键开关调试模式 |
 | 在线状态 | 后台定时探测目标可达性，卡片上显示在线/离线 |
 | 图标抓取 | 自动尝试抓取目标站点 favicon，失败则用首字母色块 |
 
@@ -275,7 +274,7 @@ FN-AppHub/
 │   ├── ui/                  # 桌面入口配置（iframe 类型，端口 9080）
 │   └── docker/
 │       ├── docker-compose.yaml
-│       ├── backend/         # FastAPI：main.py / db.py / docker_scan.py / netinfo.py / webconf.py
+│       ├── backend/         # FastAPI：main.py / db.py / docker_scan.py / netinfo.py / logbuf.py
 │       └── frontend/        # 原生 HTML+CSS+JS，无构建步骤
 ├── config/{privilege,resource}
 └── cmd/                     # 生命周期脚本（状态上报、容器名清理）
