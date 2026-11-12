@@ -348,6 +348,7 @@ const ws = {
   picker: false,
   pickerIndex: -1,
   zTop: 0,
+  split: null,
 };
 
 function wsWin(id) {
@@ -650,14 +651,50 @@ function stageSize() {
 
 /* 分屏时的列分配：
    列数同时受窗口数与可用宽度限制（每列至少 MIN_W），
-   2 个左右各半；3 个左二右一；更多按列均分 */
+   2 个左右各半；3 个左二右一；更多按列均分。
+   分屏不留间隔，所以按整宽计算，不再扣 pad/gap。 */
 function splitColumns(n, W) {
-  const fit = Math.max(1, Math.floor((W - 16) / (MIN_W + 8)));
+  const fit = Math.max(1, Math.floor(W / 220));
   let cols = n <= 2 ? n : (n <= 6 ? 2 : 3);
   cols = Math.min(cols, n, fit);
   const base = Math.floor(n / cols);
   const extra = n % cols;
   return Array.from({ length: cols }, (_, c) => base + (c < extra ? 1 : 0));
+}
+
+/* ---- 分屏轨道：列宽 / 行高按比例存，分隔线拖动只改比例 ---- */
+/* 单格下限：需要容得下标题栏（图标 + 名称 + 四个操作按钮）。
+   太小时标题栏会被裁切、按钮点不到，所以按实测给 220px，行高按 160px。 */
+const SPLIT_MIN_W = 220;
+const SPLIT_MIN_H = 160;
+
+function resetSplitState(cols) {
+  ws.split = {
+    cols: cols.slice(),
+    colRatios: cols.map(() => 1 / cols.length),
+    rowRatios: cols.map((count) => Array.from({ length: count }, () => 1 / count)),
+  };
+}
+
+/* 窗口数变化导致列结构变化时才重置比例，单纯切换布局保留用户调好的尺寸 */
+function ensureSplitState(cols) {
+  const s = ws.split;
+  const same = s && s.cols.length === cols.length && s.cols.every((v, i) => v === cols[i]);
+  if (!same) resetSplitState(cols);
+}
+
+function splitWidths(W) {
+  return ws.split.colRatios.map((r) => r * W);
+}
+
+function splitHeights(H, col) {
+  return ws.split.rowRatios[col].map((r) => r * H);
+}
+
+/* 把比例归一化（防止拖动后累计误差导致窗口溢出/留缝） */
+function normalizeRatios(ratios) {
+  const total = ratios.reduce((a, b) => a + b, 0) || 1;
+  return ratios.map((r) => r / total);
 }
 
 function applyLayout() {
@@ -667,14 +704,17 @@ function applyLayout() {
 
   const solo = ws.layout === 'solo';
   wsStage.classList.toggle('float-mode', ws.layout === 'float');
+  wsStage.classList.toggle('split-mode', ws.layout === 'split');
 
+  if (!solo) ws.wins.forEach((w) => { w.el.classList.remove('solo'); });
   ws.wins.forEach((w) => {
-    w.el.classList.toggle('solo', solo);
+    w.el.classList.toggle('solo', solo && w.id === ws.activeId);
     w.el.classList.toggle('float', ws.layout === 'float');
     w.el.classList.toggle('active', w.id === ws.activeId);
   });
 
   if (solo) {
+    clearSplitHandles();
     const active = wsActive() || ws.wins[0];
     ws.wins.forEach((w) => {
       const on = w === active;
@@ -689,25 +729,32 @@ function applyLayout() {
   }
 
   if (ws.layout === 'split') {
-    const pad = 8;
-    const gap = 8;
+    /* 分屏不留间隔：窗口紧贴铺满整个舞台，分隔线浮在交界处供拖动 */
     const cols = splitColumns(n, W);
-    const colW = (W - pad * 2 - gap * (cols.length - 1)) / cols.length;
+    ensureSplitState(cols);
+    const widths = splitWidths(W);
     let index = 0;
+    let x = 0;
     cols.forEach((count, c) => {
-      const rowH = (H - pad * 2 - gap * (count - 1)) / count;
+      const heights = splitHeights(H, c);
+      let y = 0;
       for (let r = 0; r < count; r += 1) {
         const w = ws.wins[index++];
         if (!w) return;
         w.el.style.display = 'flex';
-        w.el.style.left = `${pad + c * (colW + gap)}px`;
-        w.el.style.top = `${pad + r * (rowH + gap)}px`;
-        w.el.style.width = `${colW}px`;
-        w.el.style.height = `${rowH}px`;
+        w.el.style.left = `${x}px`;
+        w.el.style.top = `${y}px`;
+        w.el.style.width = `${widths[c]}px`;
+        w.el.style.height = `${heights[r]}px`;
+        y += heights[r];
       }
+      x += widths[c];
     });
+    renderSplitHandles(W, H);
     return;
   }
+
+  clearSplitHandles();
 
   /* float：恢复各自的位置与尺寸，首次出现时级联摆放 */
   ws.wins.forEach((w, i) => {
@@ -733,6 +780,176 @@ function applyLayout() {
   ws.wins.forEach((w, i) => { w.el.style.zIndex = String(i + 1); });
   ws.zTop = ws.wins.length;
   bumpOrder();
+}
+
+/* ---- 分屏分隔线：拖交界处调整列宽 / 行高 ---- */
+const SPLIT_HIT = 10;   /* 命中区厚度（透明，便于抓取） */
+
+function splitLayer() {
+  let layer = wsStage.querySelector('.split-layer');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'split-layer';
+    wsStage.appendChild(layer);
+  }
+  return layer;
+}
+
+function clearSplitHandles() {
+  const layer = wsStage.querySelector('.split-layer');
+  if (!layer) return;
+  layer.innerHTML = '';
+  /* 必须同步清掉签名：否则再次进入分屏时签名"看起来没变"，
+     会跳过重建，结果是分隔条全没了 */
+  delete layer.dataset.sig;
+}
+
+/* 建 / 更新分隔条。
+   注意：拖动过程中**不能重建**这些元素 —— 正在接收指针事件的那个元素一旦被
+   innerHTML 清掉，指针捕获就丢了，后续 pointermove 会落到 iframe 上被吞掉，
+   表现为拖到一半卡住。所以这里按需复用已有元素，只改几何属性。 */
+function renderSplitHandles(W, H) {
+  const layer = splitLayer();
+  const s = ws.split;
+  if (!s) return;
+  const widths = splitWidths(W);
+
+  /* 收集需要的位置：竖向（列之间）+ 横向（每列内部行之间） */
+  const specs = [];
+  let x = 0;
+  for (let c = 0; c < widths.length - 1; c += 1) {
+    x += widths[c];
+    specs.push({ axis: 'col', c, r: -1, left: x - SPLIT_HIT / 2, top: 0, width: SPLIT_HIT, height: H });
+  }
+  x = 0;
+  for (let c = 0; c < widths.length; c += 1) {
+    const heights = splitHeights(H, c);
+    let y = 0;
+    for (let r = 0; r < heights.length - 1; r += 1) {
+      y += heights[r];
+      specs.push({ axis: 'row', c, r, left: x, top: y - SPLIT_HIT / 2, width: widths[c], height: SPLIT_HIT });
+    }
+    x += widths[c];
+  }
+
+  /* 复用：元素数量不一致或结构变了才整体重建 */
+  const existing = [...layer.children];
+  const sig = specs.map((s2) => `${s2.axis}:${s2.c}:${s2.r}`).join('|');
+  if (existing.length !== specs.length || layer.dataset.sig !== sig) {
+    layer.innerHTML = '';
+    specs.forEach((sp) => {
+      const el = document.createElement('div');
+      el.className = `split-handle ${sp.axis === 'col' ? 'v' : 'h'}`;
+      el.title = sp.axis === 'col' ? '拖动调整左右宽度' : '拖动调整上下高度';
+      el.dataset.axis = sp.axis;
+      el.dataset.c = String(sp.c);
+      el.dataset.r = String(sp.r);
+      el.addEventListener('pointerdown', (e) => beginSplitDrag(e, sp.axis, sp.c, sp.r));
+      el.addEventListener('mousedown', (e) => beginSplitDrag(e, sp.axis, sp.c, sp.r));
+      layer.appendChild(el);
+    });
+    layer.dataset.sig = sig;
+  }
+
+  [...layer.children].forEach((el, i) => {
+    const sp = specs[i];
+    if (!sp) return;
+    el.style.left = `${sp.left}px`;
+    el.style.top = `${sp.top}px`;
+    el.style.width = `${sp.width}px`;
+    el.style.height = `${sp.height}px`;
+  });
+}
+
+let splitDrag = null;
+
+function beginSplitDrag(event, axis, col, row) {
+  if (ws.layout !== 'split' || event.button !== 0) return;
+  if (splitDrag) return;
+  const { W, H } = stageSize();
+  splitDrag = axis === 'col'
+    ? { axis, col, start: event.clientX, base: splitWidths(W), W, H }
+    : { axis, col, row, start: event.clientY, base: splitHeights(H, col), W, H };
+
+  wsStage.classList.add('split-dragging');
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.currentTarget && event.currentTarget.setPointerCapture && event.pointerId !== undefined) {
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
+  }
+  window.addEventListener('pointermove', onSplitDrag);
+  window.addEventListener('mousemove', onSplitDrag);
+  window.addEventListener('pointerup', endSplitDrag, { once: true });
+  window.addEventListener('mouseup', endSplitDrag, { once: true });
+}
+
+function onSplitDrag(event) {
+  if (!splitDrag) return;
+  if (event.cancelable) event.preventDefault();
+  const { axis, col, row, start, base, W, H } = splitDrag;
+  const delta = (axis === 'col' ? event.clientX : event.clientY) - start;
+
+  if (axis === 'col') {
+    /* 只动相邻两列：c 变宽 dx，c+1 变窄 dx，其余不变 */
+    const cur = base[col];
+    const next = base[col + 1];
+    const maxGrow = next - SPLIT_MIN_W;
+    const minGrow = SPLIT_MIN_W - cur;
+    const dx = clamp(delta, minGrow, maxGrow);
+    const a = cur + dx;
+    const b = next - dx;
+    const ratios = base.map((px, i) => {
+      if (i === col) return a / W;
+      if (i === col + 1) return b / W;
+      return px / W;
+    });
+    ws.split.colRatios = normalizeRatios(ratios);
+  } else {
+    const cur = base[row];
+    const next = base[row + 1];
+    const maxGrow = next - SPLIT_MIN_H;
+    const minGrow = SPLIT_MIN_H - cur;
+    const dy = clamp(delta, minGrow, maxGrow);
+    const ratios = base.map((px, i) => {
+      if (i === row) return (cur + dy) / H;
+      if (i === row + 1) return (next - dy) / H;
+      return px / H;
+    });
+    ws.split.rowRatios[col] = normalizeRatios(ratios);
+  }
+  relayoutSplit();
+}
+
+/* 拖动过程中只重排分屏（不重建 DOM），保持跟手 */
+function relayoutSplit() {
+  const { W, H } = stageSize();
+  const n = ws.wins.length;
+  if (!n || ws.layout !== 'split') return;
+  const widths = splitWidths(W);
+  let index = 0;
+  let x = 0;
+  ws.split.cols.forEach((count, c) => {
+    const heights = splitHeights(H, c);
+    let y = 0;
+    for (let r = 0; r < count; r += 1) {
+      const w = ws.wins[index++];
+      if (!w) return;
+      w.el.style.left = `${x}px`;
+      w.el.style.top = `${y}px`;
+      w.el.style.width = `${widths[c]}px`;
+      w.el.style.height = `${heights[r]}px`;
+      y += heights[r];
+    }
+    x += widths[c];
+  });
+  renderSplitHandles(W, H);
+}
+
+function endSplitDrag() {
+  splitDrag = null;
+  wsStage.classList.remove('split-dragging');
+  window.removeEventListener('pointermove', onSplitDrag);
+  window.removeEventListener('mousemove', onSplitDrag);
 }
 
 function clipRect(rect) {

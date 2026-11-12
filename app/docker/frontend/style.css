@@ -424,9 +424,51 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
   box-shadow: var(--shadow-2);
   transition: left .18s var(--ease), top .18s var(--ease), width .18s var(--ease), height .18s var(--ease);
 }
+/* 分屏：不加间隔，窗口紧贴铺满；分隔线浮在交界处供拖动 */
+.split-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  pointer-events: none;
+}
+.split-handle {
+  position: absolute;
+  pointer-events: auto;
+  background: transparent;
+  z-index: 10;
+  /* 调试时可给 .ws-stage 加 .debug-split 看命中区 */
+}
+.ws-stage.debug-split .split-handle { background: rgba(255, 0, 0, .25); }
+.split-handle.v { cursor: col-resize; }
+.split-handle.h { cursor: row-resize; }
+/* 横向分隔条层级更高：它只覆盖自己那列宽度，与竖向条在交界处重叠时
+   优先响应横向拖动（否则列边界的整高竖条会抢走行边界的手势） */
+.split-handle.h { z-index: 11; }
+/* 悬停 / 拖动时才显示一条细线，平时不占视觉 */
+.split-handle::after {
+  content: '';
+  position: absolute;
+  background: var(--brand);
+  opacity: 0;
+  transition: opacity .12s var(--ease);
+}
+.split-handle.v::after { left: 50%; top: 0; bottom: 0; width: 2px; transform: translateX(-50%); }
+.split-handle.h::after { top: 50%; left: 0; right: 0; height: 2px; transform: translateY(-50%); }
+.split-handle:hover::after,
+.split-dragging .split-handle::after { opacity: .85; }
+
+/* 分屏时窗口无圆角无间距，避免交界处露出舞台底色 */
+.ws-stage.split-mode .win {
+  border-radius: 0;
+  border-width: 0;
+  box-shadow: none;
+}
+.ws-stage.split-dragging { cursor: inherit; }
+
 /* 拖动 / 缩放过程中关掉过渡，避免跟手迟滞 */
 .ws-stage.dragging .win,
 .ws-stage.resizing .win { transition: none; }
+.ws-stage.split-dragging .win { transition: none; }
 /* 关键：拖动时 iframe 会吞掉 pointermove，必须临时屏蔽其指针事件 */
 .ws-stage.dragging .win-body iframe,
 .ws-stage.resizing .win-body iframe { pointer-events: none; }
@@ -457,17 +499,28 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
   font-size: 12.5px; font-weight: 650;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;
+  flex-shrink: 1;
 }
 .win-head .win-url {
   font-size: 11px; color: var(--text-3);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  flex: 1; min-width: 0;
+  flex: 1 1 auto; min-width: 0;
   font-variant-numeric: tabular-nums;
 }
 .win-head .win-ops { display: flex; align-items: center; gap: 1px; flex-shrink: 0; margin-left: auto; }
 .win-head .win-ops .icon-btn { width: 26px; height: 26px; border-radius: 7px; }
 .win-head .win-ops .icon-btn svg { width: 14px; height: 14px; }
 .win-head .icon-btn.on { background: var(--brand-soft); color: var(--brand); }
+/* 分屏后单格可能很窄：优先保证名称与操作按钮，先隐藏 URL 再压缩按钮间距 */
+.win { container-type: inline-size; }
+@container (max-width: 340px) {
+  .win-head .win-url { display: none; }
+}
+@container (max-width: 260px) {
+  .win-head { gap: 4px; padding: 0 2px 0 6px; }
+  .win-head .win-ops .icon-btn { width: 22px; height: 22px; }
+  .win-head .win-ops .icon-btn svg { width: 12px; height: 12px; }
+}
 
 .win-body { position: relative; flex: 1; min-height: 0; background: #fff; }
 .win-body iframe { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
