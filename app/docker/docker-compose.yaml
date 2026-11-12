@@ -1,9 +1,10 @@
+name: apphub
+
 services:
   apphub:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    image: apphub:1.0.27
+    # 镜像由 GitHub Actions 构建并推送到 GHCR，安装/升级只做拉取，不在设备上现场打包。
+    # tag 由 CI 在发布时改写为 manifest 里的版本号，写死版本可避免依赖运行环境变量。
+    image: ghcr.io/tarocats/apphub:1.0.28
     container_name: apphub
     restart: unless-stopped
     network_mode: host

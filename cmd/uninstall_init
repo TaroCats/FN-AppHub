@@ -1,8 +1,6 @@
 #!/bin/bash
-# 卸载前停止并删除容器：此前直接 exit 0，卸载后容器仍占用端口。
-# 注意：docker rm 对「仍在运行」的容器会直接失败（container is running），
-# 所以必须先 docker stop 并等到它真正退出，再执行 rm；
-# 只依赖 rm -f 在部分 fnOS / containerd 环境下也会失败，故显式走 stop -> 等待 -> rm。
+# 卸载前清理：容器 + 本项目镜像 + compose 项目记账，避免卸载后残留占用 9080。
+# 数据目录 / 数据共享（apphub.db）不在这里删，由应用中心按 data-share 声明处理。
 set +e
 
 APP_NAME="apphub"
@@ -17,11 +15,15 @@ if [ -f "$COMPOSE_FILE" ]; then
     [ -n "$DETECTED_PROJECT" ] && PROJECT="$DETECTED_PROJECT"
 fi
 
+if [ -f "${DEST}/config/resource" ]; then
+    R=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' "${DEST}/config/resource" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    [ -n "$R" ] && [ "$PROJECT" = "apphub" ] && PROJECT="$R"
+fi
+
 if ! command -v docker >/dev/null 2>&1; then
     exit 0
 fi
 
-# 等待容器真正退出，最多 30 秒
 wait_stopped() {
     _i=0
     while [ $_i -lt 30 ]; do
@@ -36,45 +38,48 @@ wait_stopped() {
 remove_container() {
     _target="$1"
     docker inspect "$_target" >/dev/null 2>&1 || return 0
-    # 1) 优雅停止（-t 20 超时后由 docker 强制终止）
     docker stop -t 20 "$_target" >/dev/null 2>&1
-    # 2) 确认已退出，未退出则强杀，避免 rm 报 container is running
     if ! wait_stopped "$_target"; then
         docker kill "$_target" >/dev/null 2>&1
         wait_stopped "$_target"
     fi
-    # 3) 删除容器；仍失败时兜底 -f
     docker rm "$_target" >/dev/null 2>&1 || docker rm -f "$_target" >/dev/null 2>&1
 }
 
-# 卸载场景：清除本项目全部容器
-# 1) 按容器名清理
-remove_container "$APP_NAME"
-
-# 2) 按 compose 项目标签清理（容器被改过名或存在多副本时兜底）
-for cid in $(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null); do
-    remove_container "$cid"
-done
-
-# 3) 同镜像残留容器兜底
-for cid in $(docker ps -aq --filter "ancestor=${APP_NAME}:latest" 2>/dev/null); do
-    remove_container "$cid"
-done
-
-# 4) 等端口释放，避免随后 compose 启动时报 address already in use
-PORT=$(grep -E "APPHUB_PORT" "$COMPOSE_FILE" 2>/dev/null | head -1 | grep -oE "[0-9]{2,5}" | head -1)
-[ -n "$PORT" ] || PORT=9080
-_i=0
-while [ $_i -lt 15 ]; do
-    _busy=""
-    if command -v ss >/dev/null 2>&1; then
-        ss -ltn 2>/dev/null | grep -q ":${PORT} " && _busy="1"
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -ltn 2>/dev/null | grep -q ":${PORT} " && _busy="1"
+# ---- 1) 优先让 compose 自己 down（连网络、孤儿容器一起收） ----
+if [ -f "$COMPOSE_FILE" ]; then
+    if command -v docker-compose >/dev/null 2>&1; then
+        (cd "$(dirname "$COMPOSE_FILE")" && docker-compose -p "$PROJECT" down --remove-orphans --volumes) >/dev/null 2>&1
     fi
-    [ -z "$_busy" ] && break
-    sleep 1
-    _i=$((_i + 1))
+    (cd "$(dirname "$COMPOSE_FILE")" && docker compose -p "$PROJECT" down --remove-orphans --volumes) >/dev/null 2>&1
+fi
+
+# ---- 2) 容器兜底清理 ----
+# 直接按名字 inspect 一次，再用 ps 名字过滤兜底
+# （报错里出现过 " /apphub" 这种带前导斜杠的脏名，直接 inspect 可能匹配不到）
+remove_container "$APP_NAME"
+remove_container "/${APP_NAME}"
+for cid in $(docker ps -aq --filter "name=^/?${APP_NAME}$" 2>/dev/null); do
+    remove_container "$cid"
+done
+
+# 项目名去重后逐个清理（新项目名可能就是 apphub，避免同一批容器被扫两遍）
+_projects=$(printf '%s\n' "$PROJECT" "apphub" "docker" | awk 'NF && !seen[$0]++')
+for _proj in $_projects; do
+    for cid in $(docker ps -aq --filter "label=com.docker.compose.project=${_proj}" 2>/dev/null); do
+        remove_container "$cid"
+    done
+done
+
+for _ref in "ghcr.io/tarocats/apphub" "apphub"; do
+    for cid in $(docker ps -aq --filter "ancestor=${_ref}" 2>/dev/null); do
+        remove_container "$cid"
+    done
+done
+
+# ---- 3) 删除本项目镜像（含历史本地构建的 apphub:*) ----
+for _img in $(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '^(ghcr\.io/tarocats/apphub|apphub):' ); do
+    docker image rm "$_img" >/dev/null 2>&1 || docker image rm -f "$_img" >/dev/null 2>&1
 done
 
 exit 0

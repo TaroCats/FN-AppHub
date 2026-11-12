@@ -2,8 +2,8 @@
 
 把本机所有 Docker 应用的 Web 入口聚合成一个页面，自动扫描容器暴露端口，支持在应用内直接内嵌浏览。
 
-- 当前版本：1.0.27
-- 安装包：`apphub_1.0.27.fpk`（飞牛应用中心 / FnDepot 均可安装）
+- 当前版本：1.0.28
+- 安装包：`apphub_1.0.28.fpk`（飞牛应用中心 / FnDepot 均可安装）
 - 端口：9080（host 网络）
 - 数据目录：`/var/apps/apphub/shares/apphub/data`（SQLite 数据库 `apphub.db`）
 
@@ -31,11 +31,13 @@ https://raw.githubusercontent.com/TaroCats/FN-AppHub/main/fnpack.json
 
 1. 从 [Releases](https://github.com/TaroCats/FN-AppHub/releases) 下载最新的 `apphub_x.y.z.fpk`。
 2. 飞牛桌面 → 应用中心 → 右上角「…」→ 手动安装应用（或直接双击 fpk）。
-3. 安装过程会基于本地源码构建镜像 `apphub:x.y.z`（首次需拉取 `python:3.12-slim`，请保持联网）。
+3. 安装过程直接从 GHCR 拉取预构建镜像（`ghcr.io/tarocats/apphub`），本机不再执行 `docker build`，安装只需下载镜像层，速度取决于网络。
 4. 桌面出现「应用聚合中心」图标，点击后在飞牛桌面窗口内加载。
 
 > 升级：直接安装新版本 fpk 覆盖升级，访问列表保留在 `/var/apps/apphub/shares/apphub/data/apphub.db`。
 > 若安装后图标点击无反应，检查 9080 是否被占用：`ss -lntp | grep 9080`。
+>
+> **镜像仓库必须公开**：安装端不做 `docker login`。若 GHCR 包被设为私有，会报 `pull access denied`——到 GitHub → Packages → `apphub` → Package settings 里把可见性改为 Public（首包发布后默认继承仓库可见性，需手工确认一次）。
 
 ## 功能
 
@@ -58,16 +60,25 @@ https://raw.githubusercontent.com/TaroCats/FN-AppHub/main/fnpack.json
 | 触发方式 | 行为 |
 | --- | --- |
 | push 到 `main` / Pull Request | 用官方 `fnpack` 打包并校验包内 manifest，仅上传 workflow artifact，不发布 |
-| push 标签 `v*` | 打包 → 创建/更新同名 Release 并上传 fpk → 重写 `fnpack.json` 的版本节点（`sha256`/`size`/`changelog`）→ 回写 `main` |
+| push 标签 `v*` / 手动 `workflow_dispatch` | 构建镜像并推送到 `ghcr.io/tarocats/apphub`（版本 tag + `latest`）→ 校验镜像可匿名拉取 → 打包 fpk → 创建/更新 Release → 重写 `fnpack.json` 版本节点 → 回写 `main` |
 | 手动 `workflow_dispatch` | 可选 `none/patch/minor/major` 递增版本号，随后与 tag 发布流程一致 |
+
+### 镜像构建与分发
+
+镜像在 CI 里构建，安装端只拉取，这是「更新失败」类问题的根治方式：
+
+- **不再现场打包**：容器镜像 `ghcr.io/tarocats/apphub` 由 `docker/build-push-action` 在 GitHub Actions 上构建并推送，设备端不再执行 `docker build`。以前每次安装/升级都要在 NAS 上重新构建，既慢，又在构建失败时把整个更新卡死。
+- **不再有本地 `<app>:<ver>` 镜像**：旧 compose 写 `image: apphub:1.0.26` 且带 `build:`，docker 会先去仓库找一个叫 `apphub` 的镜像，找不到就报 `pull access denied for apphub, repository does not exist`——这正是更新报错里最容易被误读的一条。现在 compose 只指向 GHCR，不存在这个名字冲突。
+- **升会强制拉新**：`upgrade_init` 会先 `docker image rm` 本地同名 tag 再 `docker pull`，避免 docker 认为"已是最新"而跳过，升级后跑的还是旧镜像。
+- **compose 写了 `name: apphub`**：旧版没有项目名，fnOS 传进来的容器名带前导斜杠（报错里的 `" /apphub"`），按名字清理匹配不到，于是残留容器占着名字，compose 再创建就报 `Conflict`。现在项目名固定，`upgrade_init` 还会按「容器名 / `/?` 前缀名 / 项目标签 / 同镜像」四重兜底清理。
 
 发布一个新版本的两种做法：
 
 ```bash
 # A. 手动改版本号后打标签
 #    编辑 manifest 的 version 与 app/docker/docker-compose.yaml 的 image tag
-git commit -am "chore: bump 1.0.15"
-git tag v1.0.15 && git push origin main --tags
+git commit -am "chore: bump 1.0.28"
+git tag v1.0.28 && git push origin main --tags
 ```
 
 ```text
@@ -91,6 +102,17 @@ python3 scripts/gen_fnpack.py --version 1.0.13 \
 ```
 
 > `fnpack.json` 中的 `sha256` 必须与 Release 上的 fpk 完全一致，否则 FnDepot 会校验失败并跳过该版本。请始终让工作流生成，不要手工编造哈希。
+
+## 1.0.28 变更
+- **镜像改为 CI 构建、设备端只拉取**：镜像由 GitHub Actions 用 `docker build-push-action` 构建后推送到 `ghcr.io/tarocats/apphub`（版本 tag + `latest`），compose 里删掉 `build:`，安装与升级不再在设备上现场 `docker build`。以前每次更新都要在 NAS 上重新构建一遍，既慢（首次还得拉 `python:3.12-slim`），又会在构建失败时把整个更新卡死——这是「经常更新报错」的主因。
+- **根治 `pull access denied for apphub`**：旧 compose 写 `image: apphub:1.0.27` 且带 `build:`，docker 会先去仓库找一个叫 `apphub` 的镜像，找不到就报 `repository does not exist or may require 'docker login'`。现在镜像只来自 GHCR，不存在这个名字歧义；脚本也只在镜像名带 `/`（即远程仓库）时才执行 pull，不会再对本地构建镜像发起无意义的拉取。
+- **根治 `container name "/apphub" is already in use`**：旧 compose 没有项目名，fnOS 传入的容器名带前导斜杠，按名字清理根本匹配不到，残留容器一直占着名字与 9080。现在 compose 增加 `name: apphub` 固定项目名，脚本按「容器名 → `/?` 前缀名过滤 → compose 项目标签 → 同镜像」四重兜底清理，并额外调一次 `compose down --remove-orphans` 收掉孤儿容器。
+- **先拉后清，升级不会「拉到一半变砖」**：两个脚本都改为**先拉取新镜像、再清理旧容器**。反过来做的话，一旦拉取失败（网络抖动、镜像还没推上去），旧容器已被删除、新镜像又没有，应用直接下线。现在新镜像没到手就什么都不动。
+- **拉取失败自动降级 `latest`**：指定版本 tag 拉不到时回退 `latest`，并把 compose 的 `image` 改写为 `latest`，避免 compose 因引用了不存在的版本 tag 而启动失败。
+- **升级强制拉新**：`upgrade_init` 会先 `docker image rm` 本地同名 tag 再 `docker pull`，否则 docker 可能判定「已是最新」直接跳过，升级完跑的还是旧镜像。
+- **CI 增加推送后校验**：镜像推送后用一个无凭据的 GHCR token 拉一次 manifest，确认能被匿名拉取。安装端不做 `docker login`，这一步能提前发现「包被设成私有」导致的装机失败。
+- **卸载清理到镜像**：`uninstall_init` 除容器与 compose 项目外，一并删除 `ghcr.io/tarocats/apphub:*` 与历史遗留的 `apphub:*` 本地镜像，卸载后不残留占空间。
+- **脚本兼容性修正**：改写 compose 时不再用 `sed -i`（busybox 版不支持无参数形式），改为「临时文件 + mv」，避免在部分 fnOS 环境下静默失败。
 
 ## 1.0.27 变更
 - **内嵌浏览支持多窗口**：原来点卡片只能开一个内嵌页、开第二个就替换掉第一个。现在内嵌是一个工作区，可以同时开多个应用窗口，顶部标签栏按打开顺序排列，点标签切换、点标签上的 × 只关那一个窗口；已打开的应用在新建窗口的选择器里标记「已打开」，再选它就直接切过去，不会重复开。

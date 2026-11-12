@@ -1,27 +1,58 @@
 #!/bin/bash
-# 升级前清理旧容器。
-# 注意：docker rm 对「仍在运行」的容器会直接失败（container is running），
-# 所以必须先 docker stop 并等到它真正退出，再执行 rm；
-# 只依赖 rm -f 在部分 fnOS / containerd 环境下也会失败，故显式走 stop -> 等待 -> rm。
+# 升级前准备（解决「容器名已存在 / 镜像拉不到」导致的更新失败）。
+#
+# 顺序很关键：**先拉镜像，再清容器**。
+# 反过来的话，一旦拉取失败（网络抖动、镜像还没推上去），旧容器已经被删掉，
+# 应用就直接下线了。先拉后清能保证「新镜像没到位就什么都不动」。
+#
+# 报错背景：
+#   - `pull access denied for apphub`：旧 compose 写的是本地构建镜像 `apphub:<ver>`，
+#     docker 会先去仓库找同名镜像，找不到就报 denied。现在镜像只来自 GHCR，不再有这个名字。
+#   - `container name "/apphub" is already in use`：旧 compose 没有项目名，
+#     fnOS 传入的容器名带前导斜杠，按名字清理匹配不到，容器残留占名。
+#
+# 任一步失败都不阻断升级（一律 exit 0，交给应用中心继续）。
 set +e
 
 APP_NAME="apphub"
 PROJECT="apphub"
 DEST="${TRIM_APPDEST:-/vol2/@appcenter/apphub}"
 COMPOSE_FILE="${DEST}/docker/docker-compose.yaml"
+IMAGE=""
+REMOTE_IMAGE=""
 
+# ---- 从 compose 读取容器名 / 项目名 / 镜像引用 ----
 if [ -f "$COMPOSE_FILE" ]; then
     DETECTED=$(grep -E "^[[:space:]]*container_name" "$COMPOSE_FILE" | head -1 | awk -F ':' '{print $2}' | xargs)
     [ -n "$DETECTED" ] && APP_NAME="$DETECTED"
     DETECTED_PROJECT=$(grep -E "^[[:space:]]*name:" "$COMPOSE_FILE" | head -1 | awk -F ':' '{print $2}' | xargs)
     [ -n "$DETECTED_PROJECT" ] && PROJECT="$DETECTED_PROJECT"
+    # 取 image: 后面的整串，兼容 ghcr.io/x/y:1.2.3 与 ${VAR:-latest}
+    DETECTED_IMAGE=$(grep -E "^[[:space:]]*image:" "$COMPOSE_FILE" | head -1 | sed 's/^[[:space:]]*image:[[:space:]]*//' | xargs)
+    case "$DETECTED_IMAGE" in
+        *'${'*)
+            _def=$(printf '%s' "$DETECTED_IMAGE" | sed -n 's/.*:-\([^}]*\)}.*/\1/p')
+            _base=$(printf '%s' "$DETECTED_IMAGE" | sed 's/\${[^}]*}//')
+            DETECTED_IMAGE="${_base}${_def:-latest}"
+            ;;
+    esac
+    [ -n "$DETECTED_IMAGE" ] && IMAGE="$DETECTED_IMAGE"
+fi
+
+# 只有带仓库路径的才算远程镜像（apphub:1.0.26 这类本地构建镜像拉不到，别去 pull）
+case "$IMAGE" in
+    */*) REMOTE_IMAGE="$IMAGE" ;;
+esac
+
+if [ -f "${DEST}/config/resource" ]; then
+    R=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' "${DEST}/config/resource" 2>/dev/null | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    [ -n "$R" ] && [ "$PROJECT" = "apphub" ] && PROJECT="$R"
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
     exit 0
 fi
 
-# 等待容器真正退出，最多 30 秒
 wait_stopped() {
     _i=0
     while [ $_i -lt 30 ]; do
@@ -36,35 +67,92 @@ wait_stopped() {
 remove_container() {
     _target="$1"
     docker inspect "$_target" >/dev/null 2>&1 || return 0
-    # 1) 优雅停止（-t 20 超时后由 docker 强制终止）
     docker stop -t 20 "$_target" >/dev/null 2>&1
-    # 2) 确认已退出，未退出则强杀，避免 rm 报 container is running
     if ! wait_stopped "$_target"; then
         docker kill "$_target" >/dev/null 2>&1
         wait_stopped "$_target"
     fi
-    # 3) 删除容器；仍失败时兜底 -f
     docker rm "$_target" >/dev/null 2>&1 || docker rm -f "$_target" >/dev/null 2>&1
 }
 
-# 1) 按容器名清理
+# ============ 第 1 步：先把新镜像拿到手 ============
+# 这一步不清任何容器，失败也不影响正在运行的旧版本。
+if [ -n "$REMOTE_IMAGE" ]; then
+    # 删本地同名 tag，否则 docker 可能认为"已是最新"而跳过拉取，升级后跑的还是旧镜像。
+    # 只删 tag 不动镜像层，正在运行的容器不受影响。
+    docker image rm "$REMOTE_IMAGE" >/dev/null 2>&1
+    _pulled=""
+    for _try in 1 2 3; do
+        if docker pull "$REMOTE_IMAGE" >/dev/null 2>&1; then
+            _pulled="1"
+            break
+        fi
+        sleep 3
+    done
+    if [ -z "$_pulled" ]; then
+        # 指定版本拉不到时回退 latest，避免本次版本 tag 尚未推送导致装不上
+        _repo="${REMOTE_IMAGE%:*}"
+        _latest="${_repo}:latest"
+        docker image rm "$_latest" >/dev/null 2>&1
+        for _try in 1 2; do
+            if docker pull "$_latest" >/dev/null 2>&1; then
+                _pulled="1"
+                # 把 compose 的 image 指向 latest，避免启动时因版本 tag 不存在而失败
+                # 用临时文件改写，兼容 busybox sed（不支持 -i 无参数形式）
+                if [ -f "$COMPOSE_FILE" ]; then
+                    sed "s|^\([[:space:]]*image:[[:space:]]*\)${_repo}:[^[:space:]]*|\1${_latest}|" \
+                        "$COMPOSE_FILE" > "${COMPOSE_FILE}.tmp" 2>/dev/null \
+                        && mv "${COMPOSE_FILE}.tmp" "$COMPOSE_FILE" 2>/dev/null
+                    rm -f "${COMPOSE_FILE}.tmp" 2>/dev/null
+                fi
+                break
+            fi
+            sleep 3
+        done
+    fi
+fi
+
+# ============ 第 2 步：清理旧容器 ============
+# 直接按名字 inspect 一次，再用 ps 名字过滤兜底
+# （报错里出现过 " /apphub" 这种带前导斜杠的脏名，直接 inspect 可能匹配不到）
 remove_container "$APP_NAME"
-
-# 2) 按 compose 项目标签清理（容器被改过名或存在多副本时兜底）
-for cid in $(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null); do
+remove_container "/${APP_NAME}"
+for cid in $(docker ps -aq --filter "name=^/?${APP_NAME}$" 2>/dev/null); do
     remove_container "$cid"
 done
 
-# 3) 同镜像残留容器兜底
-for cid in $(docker ps -aq --filter "ancestor=${APP_NAME}:latest" 2>/dev/null); do
-    remove_container "$cid"
+# 项目名去重后逐个清理（新项目名可能就是 apphub，避免同一批容器被扫两遍）
+_projects=$(printf '%s\n' "$PROJECT" "apphub" "docker" | awk 'NF && !seen[$0]++')
+for _proj in $_projects; do
+    for cid in $(docker ps -aq --filter "label=com.docker.compose.project=${_proj}" 2>/dev/null); do
+        remove_container "$cid"
+    done
 done
 
-# 4) 等端口释放，避免随后 compose 启动时报 address already in use
+# 用 compose 自己的记账清理（名字被改过也能覆盖）
+if [ -f "$COMPOSE_FILE" ]; then
+    if command -v docker-compose >/dev/null 2>&1; then
+        (cd "$(dirname "$COMPOSE_FILE")" && docker-compose -p "$PROJECT" down --remove-orphans) >/dev/null 2>&1
+    fi
+    (cd "$(dirname "$COMPOSE_FILE")" && docker compose -p "$PROJECT" down --remove-orphans) >/dev/null 2>&1
+fi
+
+# 同镜像残留容器
+for _ref in "ghcr.io/tarocats/apphub" "apphub" "${APP_NAME}:latest"; do
+    for cid in $(docker ps -aq --filter "ancestor=${_ref}" 2>/dev/null); do
+        remove_container "$cid"
+    done
+done
+
+# 清理后仍存在的同名容器，最后兜底强删一次
+remove_container "$APP_NAME"
+remove_container "/${APP_NAME}"
+
+# ============ 第 3 步：等端口释放 ============
 PORT=$(grep -E "APPHUB_PORT" "$COMPOSE_FILE" 2>/dev/null | head -1 | grep -oE "[0-9]{2,5}" | head -1)
 [ -n "$PORT" ] || PORT=9080
 _i=0
-while [ $_i -lt 15 ]; do
+while [ $_i -lt 20 ]; do
     _busy=""
     if command -v ss >/dev/null 2>&1; then
         ss -ltn 2>/dev/null | grep -q ":${PORT} " && _busy="1"

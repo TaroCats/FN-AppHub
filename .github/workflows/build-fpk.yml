@@ -20,11 +20,13 @@ concurrency:
 
 permissions:
   contents: write
+  packages: write
 
 env:
   FNPACK_VERSION: '1.2.3'
   FNPACK_URL: 'https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64'
   IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+  IMAGE_REPO: ghcr.io/tarocats/apphub
 
 jobs:
   build:
@@ -68,10 +70,14 @@ jobs:
               text = re.sub(r'(?m)^version\s*=.*$', 'version               = ' + new, text)
               manifest.write_text(text, encoding='utf-8')
 
-          # compose 中的镜像 tag 与 manifest 版本保持一致
+          # compose 中的镜像 tag 与 manifest 版本保持一致（镜像指向 GHCR，不在设备上构建）
           compose = pathlib.Path('app/docker/docker-compose.yaml')
           ctext = compose.read_text(encoding='utf-8')
-          ctext = re.sub(r'(?m)^(\s*image:\s*apphub:).*$', r'\g<1>' + new, ctext)
+          ctext = re.sub(
+              r'(?m)^(\s*image:\s*ghcr\.io/[^:\s]+:).*$',
+              r'\g<1>' + new,
+              ctext,
+          )
           compose.write_text(ctext, encoding='utf-8')
 
           pathlib.Path('.version').write_text(new, encoding='utf-8')
@@ -82,6 +88,56 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "版本号：${VERSION}"
+
+      - name: 初始化 buildx
+        if: env.IS_RELEASE == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        if: env.IS_RELEASE == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送镜像到 GHCR
+        if: env.IS_RELEASE == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: app/docker
+          file: app/docker/backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE_REPO }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: 校验镜像可被匿名拉取
+        if: env.IS_RELEASE == 'true'
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.ver.outputs.version }}'
+          # 安装端不做 docker login，镜像包必须公开可拉，否则装机时会报
+          # `pull access denied ... may require 'docker login'`。
+          # 这里用「无凭据」的 token 探测，能拉到才算通过。
+          ACCEPT='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+          if ! curl -fsS "https://ghcr.io/token?scope=repository:tarocats/apphub:pull&service=ghcr.io" \
+                -o /tmp/ghcr-token.json; then
+            echo "::error::无法获取 GHCR 匿名 token，检查仓库可见性"
+            exit 1
+          fi
+          TOKEN=$(python3 -c "import json;print(json.load(open('/tmp/ghcr-token.json'))['token'])")
+          if ! curl -fsS -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT}" \
+                "https://ghcr.io/v2/tarocats/apphub/manifests/${VERSION}" -o /tmp/manifest.json; then
+            echo "::error::镜像 ghcr.io/tarocats/apphub:${VERSION} 无法匿名拉取。"
+            echo "请到 GitHub → Packages → apphub → Package settings，把可见性改为 Public 后重跑。"
+            exit 1
+          fi
+          echo "镜像 ${IMAGE_REPO}:${VERSION} 可匿名拉取"
 
       - name: 安装 fnpack
         run: |
