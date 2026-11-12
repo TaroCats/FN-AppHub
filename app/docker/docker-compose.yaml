@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    image: apphub:1.0.26
+    image: apphub:1.0.27
     container_name: apphub
     restart: unless-stopped
     network_mode: host

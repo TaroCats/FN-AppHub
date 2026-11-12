@@ -59,36 +59,44 @@
     </div>
   </main>
 
-  <!-- 内嵌浏览器 -->
-  <section class="viewer" id="viewer" hidden>
-    <div class="viewer-bar">
-      <button class="icon-btn" id="viewer-back" title="返回列表">
+  <!-- 内嵌多窗口浏览：全屏 / 分屏 / 缩小（浮动） -->
+  <section class="workspace" id="workspace" hidden>
+    <header class="ws-bar">
+      <button class="icon-btn" id="ws-back" title="返回应用列表">
         <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
       </button>
-      <div class="viewer-title">
-        <strong id="viewer-name"></strong>
-        <span id="viewer-url"></span>
-      </div>
-      <div class="viewer-tools">
-        <button class="icon-btn" id="viewer-reload" title="刷新">
-          <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/></svg>
+
+      <div class="ws-tabs" id="ws-tabs" role="tablist" aria-label="已打开的应用窗口"></div>
+
+      <div class="ws-tools">
+        <div class="seg" id="ws-layout" role="group" aria-label="窗口布局">
+          <button type="button" data-layout="solo" title="全屏：当前窗口占满整个画面">全屏</button>
+          <button type="button" data-layout="split" title="分屏：所有窗口平铺">分屏</button>
+          <button type="button" data-layout="float" title="缩小：窗口变为可拖动、可缩放的浮动窗">缩小</button>
+        </div>
+        <button class="icon-btn" id="ws-add" title="打开新窗口">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
         </button>
-        <button class="icon-btn" id="viewer-open" title="在新窗口打开">
-          <svg viewBox="0 0 24 24"><path d="M14 5h5v5"/><path d="M19 5l-8 8"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>
-        </button>
-        <button class="icon-btn" id="viewer-full" title="全屏">
+        <button class="icon-btn" id="ws-full" title="浏览器全屏">
           <svg viewBox="0 0 24 24"><path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></svg>
         </button>
-        <button class="icon-btn" id="viewer-close" title="关闭">
+        <button class="icon-btn" id="ws-close-all" title="关闭全部窗口">
           <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </div>
+    </header>
+
+    <div class="ws-stage" id="ws-stage"></div>
+
+    <div class="ws-empty" id="ws-empty" hidden>
+      <p>还没有打开的应用</p>
+      <button class="btn primary" id="ws-empty-add">打开应用</button>
     </div>
-    <div class="viewer-hint" id="viewer-hint" hidden>
-      <span id="viewer-hint-text">页面加载较慢或被站点拒绝内嵌：用右上角「新窗口」在浏览器里直接打开即可。</span>
-      <button class="mini" id="hint-direct">新窗口打开</button>
+
+    <div class="app-picker" id="app-picker" hidden>
+      <input id="picker-search" placeholder="搜索应用，回车打开" autocomplete="off">
+      <div class="picker-list" id="picker-list"></div>
     </div>
-    <iframe id="frame" title="应用预览"></iframe>
   </section>
 
   <!-- 扫描抽屉 -->

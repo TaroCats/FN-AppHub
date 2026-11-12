@@ -20,8 +20,6 @@ const grid = $('#grid');
 const chips = $('#chips');
 const statsBar = $('#stats');
 const emptyBox = $('#empty');
-const viewer = $('#viewer');
-const frame = $('#frame');
 const toastEl = $('#toast');
 
 /* ---------------- 工具函数 ---------------- */
@@ -329,30 +327,232 @@ async function removeApp(app) {
   }
 }
 
-/* ---------------- 内嵌浏览 ---------------- */
+/* ---------------- 内嵌多窗口浏览 ---------------- */
+/* 三种布局：
+   - solo  全屏：当前窗口占满舞台，其余隐藏（多窗口时用顶部标签切换）
+   - split 分屏：所有窗口平铺，2 个左右各半，3 个左二右一，更多按列均分
+   - float 缩小：窗口变成可拖动、可缩放、可叠放的浮动窗 */
+
+const workspace = $('#workspace');
+const wsStage = $('#ws-stage');
+const wsTabs = $('#ws-tabs');
+const WS_LAYOUT_KEY = 'apphub.ws.layout';
+const MIN_W = 260;
+const MIN_H = 180;
+
+const ws = {
+  wins: [],
+  activeId: null,
+  layout: 'solo',
+  seq: 0,
+  picker: false,
+  pickerIndex: -1,
+  zTop: 0,
+};
+
+function wsWin(id) {
+  return ws.wins.find((w) => w.id === id) || null;
+}
+
+function wsActive() {
+  return wsWin(ws.activeId);
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function readLayout() {
+  const saved = localStorage.getItem(WS_LAYOUT_KEY);
+  return ['solo', 'split', 'float'].includes(saved) ? saved : 'solo';
+}
+
+/* ---- 打开 / 关闭窗口 ---- */
 function openApp(app) {
-  /* 打开方式=新窗口：直接新标签页；打开方式=内嵌：窗口内浏览，内嵌模式(代理/直连)决定 iframe 的地址 */
+  /* 打开方式=新窗口：直接新标签页；打开方式=内嵌：进多窗口工作区 */
   if ((app.open_mode || 'inline') === 'window') {
     window.open(openUrl(app), '_blank', 'noopener');
     return;
   }
-  state.current = app;
-  /* 内嵌与跳转都直接用应用自己的 IP:端口，不再经过任何代理 */
-  $('#viewer-name').textContent = app.name;
-  $('#viewer-url').textContent = openUrl(app);
-  viewer.hidden = false;
-  document.body.style.overflow = 'hidden';
-  loadFrame(app);
+  wsOpen(app);
 }
 
-const HINT_TEXT = {
-  slow: '页面加载较慢或被站点拒绝内嵌：用右上角「新窗口」在浏览器里直接打开即可。',
-};
+function wsOpen(app) {
+  if (!app) return;
+  workspace.hidden = false;
+  document.body.style.overflow = 'hidden';
+  wsEmptyHint();
 
-function showViewerHint() {
-  const text = $('#viewer-hint-text');
-  if (text) text.textContent = HINT_TEXT.slow;
-  $('#viewer-hint').hidden = false;
+  const exist = ws.wins.find((w) => w.app.id === app.id);
+  if (exist) {
+    ws.activeId = exist.id;
+    renderTabs();
+    applyLayout();
+    return;
+  }
+
+  const win = buildWindow(app);
+  ws.wins.push(win);
+  ws.activeId = win.id;
+  loadWin(win);
+  renderTabs();
+  applyLayout();
+  closePicker();
+}
+
+function buildWindow(app) {
+  const id = `w${++ws.seq}`;
+  const color = colorOf(app);
+  const el = document.createElement('div');
+  el.className = 'win';
+  el.dataset.id = id;
+  el.innerHTML = `
+    <div class="win-head">
+      <span class="win-dot" style="background:${color}">${escapeHtml(initial(app.name))}</span>
+      <span class="win-name">${escapeHtml(app.name)}</span>
+      <span class="win-url"></span>
+      <div class="win-ops">
+        <button class="icon-btn" data-act="reload" title="刷新">
+          <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 5v6h-6"/></svg>
+        </button>
+        <button class="icon-btn" data-act="max" title="该窗口全屏">
+          <svg viewBox="0 0 24 24"><path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></svg>
+        </button>
+        <button class="icon-btn" data-act="newtab" title="在新窗口打开">
+          <svg viewBox="0 0 24 24"><path d="M14 5h5v5"/><path d="M19 5l-8 8"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>
+        </button>
+        <button class="icon-btn" data-act="close" title="关闭窗口">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="win-body">
+      <div class="win-hint" hidden>
+        <span>页面加载较慢或被站点拒绝内嵌：用右上角「新窗口」在浏览器里直接打开。</span>
+        <button class="mini" data-act="newtab">新窗口打开</button>
+      </div>
+    </div>
+    <span class="win-grip" title="拖动缩放"></span>`;
+
+  const win = {
+    id,
+    app,
+    el,
+    url: openUrl(app),
+    hint: el.querySelector('.win-hint'),
+    body: el.querySelector('.win-body'),
+    frame: null,
+    timer: 0,
+    rect: null,
+  };
+  el.querySelector('.win-url').textContent = win.url;
+  wsStage.appendChild(el);
+
+  el.addEventListener('mousedown', () => activate(id, false));
+  el.addEventListener('click', (event) => {
+    const btn = event.target.closest('button[data-act]');
+    if (btn) {
+      event.stopPropagation();
+      winAction(btn.dataset.act, win);
+      return;
+    }
+    activate(id, false);
+  });
+  /* 浮动窗：拖标题栏移动、双击标题栏放大 */
+  const head = el.querySelector('.win-head');
+  head.addEventListener('dblclick', (event) => {
+    if (event.target.closest('button')) return;
+    if (ws.layout !== 'float') return;
+    setLayout('solo');
+    activate(id, true);
+  });
+  head.addEventListener('pointerdown', (event) => beginDrag(event, win));
+  head.addEventListener('mousedown', (event) => beginDrag(event, win));
+  const grip = el.querySelector('.win-grip');
+  grip.addEventListener('pointerdown', (event) => beginResize(event, win));
+  grip.addEventListener('mousedown', (event) => beginResize(event, win));
+
+  return win;
+}
+
+function winAction(act, win) {
+  if (act === 'reload') return loadWin(win);
+  if (act === 'newtab') return window.open(win.url, '_blank', 'noopener');
+  if (act === 'max') {
+    ws.activeId = win.id;
+    setLayout('solo');
+    renderTabs();
+    applyLayout();
+    return;
+  }
+  if (act === 'close') return closeWin(win.id);
+}
+
+function closeWin(id) {
+  const index = ws.wins.findIndex((w) => w.id === id);
+  if (index < 0) return;
+  const win = ws.wins[index];
+  clearTimeout(win.timer);
+  if (win.frame) {
+    win.frame.src = 'about:blank';
+    win.frame.remove();
+  }
+  win.el.remove();
+  ws.wins.splice(index, 1);
+  if (ws.activeId === id) {
+    const next = ws.wins[Math.min(index, ws.wins.length - 1)];
+    ws.activeId = next ? next.id : null;
+  }
+  if (!ws.wins.length) {
+    closeWorkspace();
+    return;
+  }
+  renderTabs();
+  applyLayout();
+}
+
+function closeWorkspace() {
+  ws.wins.forEach((w) => {
+    clearTimeout(w.timer);
+    if (w.frame) w.frame.src = 'about:blank';
+  });
+  ws.wins = [];
+  ws.activeId = null;
+  wsStage.innerHTML = '';
+  wsTabs.innerHTML = '';
+  workspace.hidden = true;
+  document.body.style.overflow = '';
+  closePicker();
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+
+function wsEmptyHint() {
+  $('#ws-empty').hidden = ws.wins.length > 0;
+}
+
+/* ---- 加载 iframe ---- */
+function loadWin(win) {
+  if (!win) return;
+  win.hint.hidden = true;
+  const src = win.url;
+  if (!win.frame) {
+    win.frame = document.createElement('iframe');
+    win.frame.title = win.app.name;
+    win.frame.setAttribute('allow', 'fullscreen; clipboard-read; clipboard-write');
+    win.frame.addEventListener('load', () => {
+      win.hint.hidden = true;
+      clearTimeout(win.timer);
+    });
+    win.body.appendChild(win.frame);
+  }
+  win.frame.src = src;
+  clearTimeout(win.timer);
+  win.timer = setTimeout(() => { if (wsIsOpen() && wsWin(win.id)) win.hint.hidden = false; }, 8000);
+  if (/^https?:\/\//i.test(src)) {
+    probeUrl(src).then((ok) => {
+      if (!ok && wsIsOpen() && wsWin(win.id)) win.hint.hidden = false;
+    });
+  }
 }
 
 /* 探活直连地址：no-cors 下只要能建立连接就算通 */
@@ -369,54 +569,413 @@ async function probeUrl(url) {
   }
 }
 
-function loadFrame(app) {
-  const hint = $('#viewer-hint');
-  hint.hidden = true;
-  const src = openUrl(app);
-  $('#viewer-url').textContent = src;
-  frame.src = src;
-  clearTimeout(loadFrame._t);
-  loadFrame._t = setTimeout(() => {
-    if (!viewer.hidden) showViewerHint();
-  }, 8000);
-  if (/^https?:\/\//i.test(src)) {
-    probeUrl(src).then((ok) => {
-      if (!ok && !viewer.hidden && state.current === app) showViewerHint();
-    });
+/* ---- 标签栏 ---- */
+function renderTabs() {
+  wsTabs.innerHTML = ws.wins.map((w) => {
+    const active = w.id === ws.activeId ? ' active' : '';
+    const name = escapeHtml(w.app.name);
+    return `<div class="ws-tab${active}" data-id="${w.id}" role="tab" tabindex="0"
+        aria-selected="${w.id === ws.activeId}" title="${name}">
+      <span class="tab-dot" style="background:${colorOf(w.app)}">${escapeHtml(initial(w.app.name))}</span>
+      <span class="tab-name">${name}</span>
+      <button type="button" class="tab-x" data-close="${w.id}" title="关闭 ${name}" aria-label="关闭 ${name}">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>`;
+  }).join('');
+  wsEmptyHint();
+}
+
+wsTabs.addEventListener('click', (event) => {
+  const close = event.target.closest('[data-close]');
+  if (close) {
+    event.stopPropagation();
+    closeWin(close.dataset.close);
+    return;
+  }
+  const tab = event.target.closest('.ws-tab');
+  if (tab) activate(tab.dataset.id, true);
+});
+
+/* 标签支持键盘：Enter/Space 切换，Delete/Backspace 关闭 */
+wsTabs.addEventListener('keydown', (event) => {
+  const tab = event.target.closest('.ws-tab');
+  if (!tab) return;
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    activate(tab.dataset.id, true);
+  } else if (event.key === 'Delete' || event.key === 'Backspace') {
+    event.preventDefault();
+    closeWin(tab.dataset.id);
+  }
+});
+
+function activate(id, scrollIntoView) {
+  if (!wsWin(id)) return;
+  const changed = ws.activeId !== id;
+  ws.activeId = id;
+  renderTabs();
+  /* 浮动模式：激活的窗口必须压在最上面，否则点被遮挡的窗口看不到反应 */
+  if (ws.layout === 'float') bumpOrder();
+  if (ws.layout === 'solo' || changed) applyLayout();
+  if (scrollIntoView) {
+    const tab = wsTabs.querySelector(`.ws-tab[data-id="${id}"]`);
+    if (tab) tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 }
 
-function closeViewer() {
-  viewer.hidden = true;
-  frame.src = 'about:blank';
-  document.body.style.overflow = '';
-  state.current = null;
-  clearTimeout(loadFrame._t);
+/* 浮动窗叠放：只抬升激活窗，不动 ws.wins 的顺序（标签栏必须保持打开顺序） */
+function bumpOrder() {
+  const active = wsWin(ws.activeId);
+  if (!active) return;
+  ws.zTop = (ws.zTop || ws.wins.length) + 1;
+  active.el.style.zIndex = String(ws.zTop);
+  ws.wins.forEach((w) => w.el.classList.toggle('active', w === active));
 }
 
-$('#viewer-back').addEventListener('click', closeViewer);
-$('#viewer-close').addEventListener('click', closeViewer);
-$('#viewer-reload').addEventListener('click', () => {
-  if (!state.current) return;
-  loadFrame(state.current);
+/* ---- 布局计算 ---- */
+function setLayout(layout) {
+  if (!['solo', 'split', 'float'].includes(layout)) return;
+  ws.layout = layout;
+  localStorage.setItem(WS_LAYOUT_KEY, layout);
+  document.querySelectorAll('#ws-layout button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.layout === layout);
+  });
+  applyLayout();
+}
+
+function stageSize() {
+  return { W: wsStage.clientWidth, H: wsStage.clientHeight };
+}
+
+/* 分屏时的列分配：
+   列数同时受窗口数与可用宽度限制（每列至少 MIN_W），
+   2 个左右各半；3 个左二右一；更多按列均分 */
+function splitColumns(n, W) {
+  const fit = Math.max(1, Math.floor((W - 16) / (MIN_W + 8)));
+  let cols = n <= 2 ? n : (n <= 6 ? 2 : 3);
+  cols = Math.min(cols, n, fit);
+  const base = Math.floor(n / cols);
+  const extra = n % cols;
+  return Array.from({ length: cols }, (_, c) => base + (c < extra ? 1 : 0));
+}
+
+function applyLayout() {
+  const { W, H } = stageSize();
+  const n = ws.wins.length;
+  if (!n) return;
+
+  const solo = ws.layout === 'solo';
+  wsStage.classList.toggle('float-mode', ws.layout === 'float');
+
+  ws.wins.forEach((w) => {
+    w.el.classList.toggle('solo', solo);
+    w.el.classList.toggle('float', ws.layout === 'float');
+    w.el.classList.toggle('active', w.id === ws.activeId);
+  });
+
+  if (solo) {
+    const active = wsActive() || ws.wins[0];
+    ws.wins.forEach((w) => {
+      const on = w === active;
+      w.el.style.display = on ? 'flex' : 'none';
+      if (!on) return;
+      w.el.style.left = '0px';
+      w.el.style.top = '0px';
+      w.el.style.width = `${W}px`;
+      w.el.style.height = `${H}px`;
+    });
+    return;
+  }
+
+  if (ws.layout === 'split') {
+    const pad = 8;
+    const gap = 8;
+    const cols = splitColumns(n, W);
+    const colW = (W - pad * 2 - gap * (cols.length - 1)) / cols.length;
+    let index = 0;
+    cols.forEach((count, c) => {
+      const rowH = (H - pad * 2 - gap * (count - 1)) / count;
+      for (let r = 0; r < count; r += 1) {
+        const w = ws.wins[index++];
+        if (!w) return;
+        w.el.style.display = 'flex';
+        w.el.style.left = `${pad + c * (colW + gap)}px`;
+        w.el.style.top = `${pad + r * (rowH + gap)}px`;
+        w.el.style.width = `${colW}px`;
+        w.el.style.height = `${rowH}px`;
+      }
+    });
+    return;
+  }
+
+  /* float：恢复各自的位置与尺寸，首次出现时级联摆放 */
+  ws.wins.forEach((w, i) => {
+    w.el.style.display = 'flex';
+    if (!w.rect) {
+      const fw = Math.max(MIN_W, Math.round(W * 0.64));
+      const fh = Math.max(MIN_H, Math.round(H * 0.7));
+      const maxX = Math.max(8, W - fw - 8);
+      const maxY = Math.max(8, H - fh - 8);
+      w.rect = {
+        x: clamp(16 + i * 30, 8, maxX),
+        y: clamp(14 + i * 26, 8, maxY),
+        w: fw,
+        h: fh,
+      };
+    }
+    w.rect = clipRect(w.rect);
+    w.el.style.left = `${w.rect.x}px`;
+    w.el.style.top = `${w.rect.y}px`;
+    w.el.style.width = `${w.rect.w}px`;
+    w.el.style.height = `${w.rect.h}px`;
+  });
+  ws.wins.forEach((w, i) => { w.el.style.zIndex = String(i + 1); });
+  ws.zTop = ws.wins.length;
+  bumpOrder();
+}
+
+function clipRect(rect) {
+  const { W, H } = stageSize();
+  const w = clamp(rect.w, MIN_W, Math.max(MIN_W, W - 8));
+  const h = clamp(rect.h, MIN_H, Math.max(MIN_H, H - 8));
+  return {
+    x: clamp(rect.x, 0, Math.max(0, W - w)),
+    y: clamp(rect.y, 0, Math.max(0, H - h)),
+    w,
+    h,
+  };
+}
+
+/* ---- 拖动 / 缩放（仅浮动窗） ---- */
+/* pointerdown 与 mousedown 会先后触发同一次按下（后者是兼容 MouseEvent 的），
+   用 startedAt 去重，避免同一次按下建两份监听互相覆盖起始坐标。 */
+let dragState = null;
+
+function beginDrag(event, win) {
+  if (ws.layout !== 'float' || event.button !== 0) return;
+  if (event.target.closest('button')) return;
+  if (!win.rect) return;
+  if (dragState && dragState.win === win && dragState.mode === 'move') return;
+  activate(win.id, false);
+  const { W, H } = stageSize();
+  dragState = {
+    mode: 'move',
+    win,
+    startX: event.clientX,
+    startY: event.clientY,
+    origin: { ...win.rect },
+    W,
+    H,
+  };
+  wsStage.classList.add('dragging');
+  if (event.currentTarget && event.currentTarget.setPointerCapture && event.pointerId !== undefined) {
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
+  }
+  event.preventDefault();
+  window.addEventListener('pointermove', onDragMove);
+  window.addEventListener('mousemove', onDragMove);
+  window.addEventListener('pointerup', endDrag, { once: true });
+  window.addEventListener('mouseup', endDrag, { once: true });
+}
+
+function beginResize(event, win) {
+  if (ws.layout !== 'float' || event.button !== 0) return;
+  if (!win.rect) return;
+  if (dragState && dragState.win === win && dragState.mode === 'resize') return;
+  activate(win.id, false);
+  const { W, H } = stageSize();
+  dragState = {
+    mode: 'resize',
+    win,
+    startX: event.clientX,
+    startY: event.clientY,
+    origin: { ...win.rect },
+    W,
+    H,
+  };
+  wsStage.classList.add('resizing');
+  if (event.currentTarget && event.currentTarget.setPointerCapture && event.pointerId !== undefined) {
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch (e) { /* ignore */ }
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  window.addEventListener('pointermove', onDragMove);
+  window.addEventListener('mousemove', onDragMove);
+  window.addEventListener('pointerup', endDrag, { once: true });
+  window.addEventListener('mouseup', endDrag, { once: true });
+}
+
+function onDragMove(event) {
+  if (!dragState) return;
+  if (event.cancelable) event.preventDefault();
+  const { mode, win, startX, startY, origin, W, H } = dragState;
+  const dx = event.clientX - startX;
+  const dy = event.clientY - startY;
+
+  if (mode === 'move') {
+    win.rect = {
+      ...origin,
+      x: clamp(origin.x + dx, 0, Math.max(0, W - origin.w)),
+      y: clamp(origin.y + dy, 0, Math.max(0, H - origin.h)),
+    };
+  } else {
+    win.rect = {
+      x: origin.x,
+      y: origin.y,
+      w: clamp(origin.w + dx, MIN_W, Math.max(MIN_W, W - origin.x)),
+      h: clamp(origin.h + dy, MIN_H, Math.max(MIN_H, H - origin.y)),
+    };
+  }
+  win.el.style.left = `${win.rect.x}px`;
+  win.el.style.top = `${win.rect.y}px`;
+  win.el.style.width = `${win.rect.w}px`;
+  win.el.style.height = `${win.rect.h}px`;
+}
+
+function endDrag() {
+  dragState = null;
+  wsStage.classList.remove('dragging', 'resizing');
+  window.removeEventListener('pointermove', onDragMove);
+  window.removeEventListener('mousemove', onDragMove);
+}
+
+/* ---- 工具栏事件 ---- */
+$('#ws-back').addEventListener('click', closeWorkspace);
+$('#ws-close-all').addEventListener('click', () => {
+  if (ws.wins.length > 1 && !confirm(`关闭全部 ${ws.wins.length} 个窗口？`)) return;
+  closeWorkspace();
 });
-$('#viewer-open').addEventListener('click', () => {
-  if (state.current) window.open(state.current.url, '_blank', 'noopener');
-});
-$('#viewer-full').addEventListener('click', () => {
+$('#ws-full').addEventListener('click', () => {
+  const target = workspace;
   if (!document.fullscreenElement) {
-    (viewer.requestFullscreen ? viewer.requestFullscreen() : Promise.resolve()).catch(() => {});
+    (target.requestFullscreen ? target.requestFullscreen() : Promise.resolve()).catch(() => {});
   } else {
     document.exitFullscreen().catch(() => {});
   }
 });
-$('#hint-direct').addEventListener('click', () => {
-  if (state.current) window.open(state.current.url, '_blank', 'noopener');
+$('#ws-add').addEventListener('click', (event) => {
+  event.stopPropagation();
+  togglePicker();
+});
+$('#ws-empty-add').addEventListener('click', (event) => {
+  event.stopPropagation();
+  togglePicker();
 });
 
-frame.addEventListener('load', () => {
-  $('#viewer-hint').hidden = true;
-  clearTimeout(loadFrame._t);
+document.querySelectorAll('#ws-layout button').forEach((btn) => {
+  btn.addEventListener('click', () => setLayout(btn.dataset.layout));
+});
+
+window.addEventListener('resize', () => {
+  if (wsIsOpen()) applyLayout();
+});
+
+document.addEventListener('fullscreenchange', () => {
+  if (wsIsOpen()) setTimeout(applyLayout, 60);
+});
+
+function wsIsOpen() {
+  return !workspace.hidden;
+}
+
+/* ---- 打开新窗口的选择器 ---- */
+function togglePicker() {
+  if (ws.picker) return closePicker();
+  ws.picker = true;
+  workspace.hidden = false;
+  document.body.style.overflow = 'hidden';
+  const picker = $('#app-picker');
+  picker.hidden = false;
+  ws.pickerIndex = -1;
+  const input = $('#picker-search');
+  input.value = '';
+  renderPicker('');
+  setTimeout(() => input.focus(), 20);
+  wsEmptyHint();
+}
+
+function closePicker() {
+  ws.picker = false;
+  ws.pickerIndex = -1;
+  $('#app-picker').hidden = true;
+}
+
+/* 用户主动关掉选择器（Esc / 点外面）时，若一个窗口都没开就退出工作区 */
+function dismissPicker() {
+  closePicker();
+  if (!ws.wins.length) closeWorkspace();
+}
+
+function pickerApps(keyword) {
+  const q = String(keyword || '').trim().toLowerCase();
+  return state.apps.filter((app) => {
+    if (!q) return true;
+    return [app.name, app.url, app.group_name, app.note].join(' ').toLowerCase().includes(q);
+  });
+}
+
+function renderPicker(keyword) {
+  const list = $('#picker-list');
+  const apps = pickerApps(keyword);
+  if (!apps.length) {
+    list.innerHTML = '<div class="picker-empty">没有匹配的应用</div>';
+    return;
+  }
+  const opened = new Set(ws.wins.map((w) => w.app.id));
+  list.innerHTML = apps.slice(0, 60).map((app, i) => `
+    <div class="picker-item${i === ws.pickerIndex ? ' active' : ''}" data-id="${app.id}">
+      <span class="pi-dot" style="background:${colorOf(app)}">${escapeHtml(initial(app.name))}</span>
+      <span class="pi-name">${escapeHtml(app.name)}</span>
+      ${opened.has(app.id) ? '<span class="pi-open">已打开</span>' : ''}
+    </div>`).join('');
+}
+
+$('#picker-search').addEventListener('input', (event) => {
+  ws.pickerIndex = -1;
+  renderPicker(event.target.value);
+});
+
+$('#picker-search').addEventListener('keydown', (event) => {
+  const items = [...document.querySelectorAll('#picker-list .picker-item')];
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (!items.length) return;
+    const step = event.key === 'ArrowDown' ? 1 : -1;
+    ws.pickerIndex = (ws.pickerIndex + step + items.length) % items.length;
+    items.forEach((el, i) => el.classList.toggle('active', i === ws.pickerIndex));
+    items[ws.pickerIndex].scrollIntoView({ block: 'nearest' });
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    if (!items.length) return;
+    const target = items[ws.pickerIndex >= 0 ? ws.pickerIndex : 0];
+    openFromPicker(Number(target.dataset.id));
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    dismissPicker();
+  }
+});
+
+$('#picker-list').addEventListener('click', (event) => {
+  const item = event.target.closest('.picker-item');
+  if (!item) return;
+  openFromPicker(Number(item.dataset.id));
+});
+
+function openFromPicker(id) {
+  const app = state.apps.find((a) => a.id === id);
+  if (!app) return;
+  closePicker();
+  wsOpen(app);
+}
+
+document.addEventListener('click', (event) => {
+  if (!ws.picker) return;
+  const picker = $('#app-picker');
+  if (picker.contains(event.target)) return;
+  if (event.target.closest('#ws-add') || event.target.closest('#ws-empty-add')) return;
+  dismissPicker();
 });
 
 /* ---------------- 访问地址选择 ---------------- */
@@ -1230,12 +1789,53 @@ $('#search').addEventListener('input', (event) => {
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  if (!viewer.hidden) return closeViewer();
+  if (ws.picker) return dismissPicker();
   if (!$('#modal').hidden) return closeModal();
   if (!$('#scan-drawer').hidden) return closeScan();
+  if (!$('#host-modal').hidden) return;
+  if (!$('#group-modal').hidden) return;
+  /* 工作区里 Esc 只关单窗口场景，避免多窗口时误伤全部标签 */
+  if (wsIsOpen()) {
+    if (document.fullscreenElement) return;
+    if (ws.wins.length <= 1) return closeWorkspace();
+    toast(`还有 ${ws.wins.length} 个窗口：用左上角返回或右上角「关闭全部」`);
+  }
+});
+
+/* 快捷键：Alt+T 打开新窗口选择器，Alt+1..9 切换标签
+   （不用 Ctrl/Cmd+T、Ctrl/Cmd+1..9：这些是浏览器自己的新建标签 / 切标签快捷键，
+     页面拿不到，会被浏览器先拦截） */
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') return;
+  const mod = event.altKey && !event.metaKey && !event.ctrlKey;
+  if (!mod) return;
+  const inModal = !$('#modal').hidden || !$('#scan-drawer').hidden || !$('#host-modal').hidden || !$('#group-modal').hidden;
+  if (!inModal && event.key.toLowerCase() === 't') {
+    event.preventDefault();
+    if (!wsIsOpen()) {
+      workspace.hidden = false;
+      document.body.style.overflow = 'hidden';
+      setLayout(readLayout());
+    }
+    togglePicker();
+    return;
+  }
+  if (wsIsOpen() && /^[1-9]$/.test(event.key)) {
+    const win = ws.wins[Number(event.key) - 1];
+    if (!win) return;
+    event.preventDefault();
+    if (ws.layout !== 'solo') setLayout('solo');
+    activate(win.id, true);
+  }
 });
 
 $('#btn-add').addEventListener('keydown', (e) => e.stopPropagation());
+
+/* 工作区布局模式在启动时恢复 */
+document.querySelectorAll('#ws-layout button').forEach((b) => {
+  b.classList.toggle('active', b.dataset.layout === readLayout());
+});
+ws.layout = readLayout();
 
 initHostPicker();
 loadVersion();
